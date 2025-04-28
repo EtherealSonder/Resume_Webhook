@@ -1,0 +1,7 @@
+.vs/
+*.pdf
+resumes/
+__pycache__/
+*.pyc
+resumescreener-*.json
+ngrok.exe
