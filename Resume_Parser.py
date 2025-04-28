@@ -34,8 +34,8 @@ job_descriptions = {
 }
 
 
-my_api_key="aa41893d44cdb499ea1642ee730d103a"
-mindee_client = mindee.Client(api_key=my_api_key)
+mindee_api_key = os.getenv("MINDEE_API_KEY")
+mindee_client = mindee.Client(api_key=mindee_api_key)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 my_endpoint = mindee_client.create_endpoint(
