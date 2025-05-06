@@ -5,6 +5,7 @@ import mindee
 import openai
 import gspread
 import os
+import psycopg2
 
 from itertools import dropwhile
 from oauth2client.service_account import ServiceAccountCredentials
@@ -62,7 +63,15 @@ def show_result(read_resume):
 
 
 def format_list(items: List[Any]) -> str:
-    return ', '.join(item.value for item in items if item and hasattr(item, 'value'))
+    safe_items = []
+    for item in items:
+        try:
+            if item and hasattr(item, "value") and item.value is not None:
+                safe_items.append(str(item.value))
+        except Exception:
+            continue
+    return ', '.join(safe_items)
+
 
 
 def get_value(x):
@@ -174,24 +183,26 @@ def extract_section(text: str, section_header: str) -> str:
             section_lines.append(line.strip())
 
     return ' '.join(section_lines).strip()
-
-def save_to_google_sheet(parsed_data: Dict[str, Any], gpt_result: str, job_title: str, sheet_name: str = "Sheet1"):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("resumescreener-458121-72ac2607bb54.json", scope)
-    client = gspread.authorize(creds)
     
-    sheet = client.open("Resume Evaluations").worksheet(sheet_name)
+def save_to_postgresql(parsed_data, gpt_result, job_title):
+    conn = psycopg2.connect(
+        host="localhost",
+        port=5432,
+        database="resumescreener",
+        user="postgres",
+        password="urunenam!@#"
+    )
+    cur = conn.cursor()
 
-    def safe_val(field): return field.value if hasattr(field, 'value') else field or ""
+    def safe_val(x):
+        return x.value if hasattr(x, 'value') else x or ""
 
-    name = safe_val(parsed_data.get("full_name", ""))
-    email = safe_val(parsed_data.get("email", ""))
-    phone = safe_val(parsed_data.get("phone_number", ""))
-   
+    name = safe_val(parsed_data.get("full_name"))
+    email = safe_val(parsed_data.get("email"))
+    phone = safe_val(parsed_data.get("phone_number"))
+    resume_url = ""  # Optional: populate from earlier in pipeline
 
-    score = ""
-    summary = ""
-
+    score, summary = "", ""
     for line in gpt_result.split("\n"):
         if line.lower().startswith("match score") and not score:
             score = float(line.split(":", 1)[-1].strip())
@@ -201,9 +212,40 @@ def save_to_google_sheet(parsed_data: Dict[str, Any], gpt_result: str, job_title
     strength = extract_section(gpt_result, "Strengths:")
     weakness = extract_section(gpt_result, "Weaknesses:")
 
+    # Get job_id from title
+    cur.execute("SELECT id FROM jobs WHERE job_title = %s LIMIT 1;", (job_title,))
+    job_row = cur.fetchone()
+    if not job_row:
+        cur.execute("INSERT INTO jobs (job_title, job_description) VALUES (%s, %s) RETURNING id;",
+                    (job_title, "Placeholder description"))
+        job_id = cur.fetchone()[0]
+    else:
+        job_id = job_row[0]
 
-    row = [job_title,name, email, phone, strength, weakness, score, summary]
-    sheet.append_row(row)
+# Ensure all values are safe strings
+    name = str(name or "")
+    email = str(email or "")
+    phone = str(phone or "")
+    resume_url = str(resume_url or "")
+    score = float(score) if score not in (None, "") else 0.0
+    summary = str(summary or "")
+    strength = str(strength or "")
+    weakness = str(weakness or "")
+
+    # Insert or update resume row
+    cur.execute("""
+        INSERT INTO resumes (job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (email, job_id) DO UPDATE 
+        SET phone = EXCLUDED.phone, score = EXCLUDED.score, summary = EXCLUDED.summary,
+            strengths = EXCLUDED.strengths, weaknesses = EXCLUDED.weaknesses;
+    """, (job_id, name, email, phone, resume_url, score, summary, strength, weakness))
+
+    print(f"Saving to PostgreSQL: {name}, {email}, Job: {job_title}")
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def main():
@@ -225,7 +267,8 @@ def process_resume_file(file_path: str,job_title="Unknown Role"):
     print(f"\nProcessed: {file_path}\n")
     print(gpt_result)
     
-    save_to_google_sheet(parsed_resume.inference.prediction.fields, gpt_result, job_title)
+    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title)
+
 
     
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from flask import Flask, request
 import json
 import requests
 import os
+import traceback
 
 from Resume_Parser import process_resume_file
 
@@ -49,6 +50,7 @@ def webhook():
         return "Resume downloaded and processed", 200
     except Exception as e:
         print("Error:", e)
+        traceback.print_exc() 
         return f"Error: {str(e)}", 500
 
 if __name__ == "__main__":
