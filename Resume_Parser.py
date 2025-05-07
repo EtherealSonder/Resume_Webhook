@@ -7,6 +7,7 @@ import gspread
 import os
 import psycopg2
 import urllib.parse as up
+import json 
 
 from itertools import dropwhile
 from oauth2client.service_account import ServiceAccountCredentials
@@ -105,8 +106,7 @@ def calculate_experience_years(experiences: List[Any]) -> float:
 
 
 
-def evaluate_resume(resume_data: Dict[str, Any], job_description: str) -> str:
-    
+def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_letter: str = "") -> Dict[str, Any]:
     technical_skills = resume_data.get("technical_skills")
     soft_skills = resume_data.get("soft_skills")
 
@@ -115,18 +115,15 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str) -> str:
         skills_list.extend(technical_skills.values)
     if soft_skills:
         skills_list.extend(soft_skills.values)
-        
+
     certifications = resume_data.get("certifications")
     certifications_list = []
-
     if certifications:
         certifications_list.extend(certifications.values)
-    
+
     experience_field = resume_data.get("professional_experience", None)
     experience_entries = experience_field.values if experience_field and hasattr(experience_field, "values") else []
-
     experience_years = calculate_experience_years(experience_entries)
-
 
     candidate_info = {
         "Full Name": resume_data.get("full_name", ""),
@@ -139,34 +136,46 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str) -> str:
     }
 
     formatted_resume = '\n'.join(
-        f"{key}: {value}" for key, value in candidate_info.items() if value)
+        f"{key}: {value}" for key, value in candidate_info.items() if value
+    )
 
+    # Base prompt
     prompt = (
-    "You are an experienced technical recruiter tasked with screening candidates for a job opening.\n"
-    "You will be given a job description and a candidate's resume data. Your job is to analyze the match between the two.\n\n"
+        "You are an experienced technical recruiter tasked with screening candidates for a job opening.\n"
+        "You will be given a job description, resume data, and optionally a cover letter.\n"
+        "Analyze and score the candidate using the rubric below.\n\n"
 
-    "### Instructions:\n"
-    "1. Carefully analyze the candidate's skills, experience, certifications, and education.\n"
-    "2. Compare them against the job requirements.\n"
-    "3. Be critical and objective, but fair.\n\n"
+        "### Scoring Rubric:\n"
+        "- Skills match: 40 points\n"
+        "- Relevant experience (years and domain): 30 points\n"
+        "- Certifications and education: 15 points\n"
+        "- Communication and motivation (from cover letter): 15 points\n"
+        "Total: 100 points\n\n"
 
-    f"### Job Description:\n{job_description.strip()}\n\n"
-    
-    "### Candidate Resume:\n"
-    f"{formatted_resume}\n\n"
+       "### Response Format:\n"
+        "Match Score: <score between 0 and 100>\n"
+        "Summary: <a 2–4 sentence explanation of why the candidate is or isn't a good fit>\n"
+        "Strengths: <list top 3 reasons they are a good match>\n"
+        "Weaknesses: <list top 3 reasons they may not be a good match>\n\n"
+        f"### Job Description:\n{job_description.strip()}\n\n"
+        f"### Candidate Resume:\n{formatted_resume}\n"
+    )
 
-    "### Response Format:\n"
-    "Match Score: <score between 0 and 100>\n"
-    "Summary: <a 2-4 sentence explanation of why the candidate is or isn't a good fit>\n"
-    "Strengths: <list top 3 reasons they are a good match>\n"
-    "Weaknesses: <list top 3 reasons they may not be a good match>\n")
+    if cover_letter:
+        prompt += f"\n### Cover Letter:\n{cover_letter.strip()}\n"
 
+    # Make the OpenAI API call
     response = openai_client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0.4)
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a critical but fair technical recruiter who follows structured scoring and returns JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.4
+    )
 
     return response.choices[0].message.content.strip()
+
 
 
 def extract_section(text: str, section_header: str) -> str:
@@ -185,7 +194,7 @@ def extract_section(text: str, section_header: str) -> str:
 
     return ' '.join(section_lines).strip()
     
-def save_to_postgresql(parsed_data, gpt_result, job_title):
+def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url):
     
     # Read connection string from environment variable
     db_url = os.getenv("DATABASE_URL")
@@ -204,7 +213,6 @@ def save_to_postgresql(parsed_data, gpt_result, job_title):
     name = safe_val(parsed_data.get("full_name"))
     email = safe_val(parsed_data.get("email"))
     phone = safe_val(parsed_data.get("phone_number"))
-    resume_url = ""  # Optional: populate from earlier in pipeline
 
     score, summary = "", ""
     for line in gpt_result.split("\n"):
@@ -261,17 +269,17 @@ def job_description_for(title):
     return job_descriptions.get(title, "No job description found.")
 
 
-def process_resume_file(file_path: str,job_title="Unknown Role"):
+def process_resume_file(file_path: str,job_title="Unknown Role", resume_url="", cover_letter=""):
     parsed_resume = read_resume(file_path)
     show_result(parsed_resume)
     
     job_description = job_description_for(job_title)
-    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description)
+    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
     
     print(f"\nProcessed: {file_path}\n")
     print(gpt_result)
     
-    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title)
+    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url)
 
 
     

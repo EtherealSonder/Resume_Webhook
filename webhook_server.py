@@ -46,7 +46,7 @@ def webhook():
 
     try:
         local_path = download_from_drive(file_url)
-        process_resume_file(local_path, job_title)
+        process_resume_file(local_path, job_title, file_url)
         return "Resume downloaded and processed", 200
     except Exception as e:
         print("Error:", e)

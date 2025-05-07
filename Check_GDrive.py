@@ -44,11 +44,11 @@ def get_file_to_jobtitle_mapping(sheet_name="Form Responses 1"):
         if len(row) >= 5:
             job_title = row[3].strip()
             file_link = row[4].strip()
-
+            cover_letter = row[5].strip() if len(row) >= 6 else ""
             # Extract file ID from Google Drive share link
             if "id=" in file_link:
                 file_id = file_link.split("id=")[-1]
-                mapping[file_id] = job_title
+                mapping[file_id] = (job_title,cover_letter)
 
     return mapping
 
@@ -70,9 +70,10 @@ def scan_drive_for_resumes():
             continue
 
         downloaded_path = download_file(file_id, file_name, drive_service)
-        job_title = file_to_job.get(file_id, "Unknown Role")
+        job_info = file_to_job.get(file_id, ("Unknown Role", ""))
+        job_title, cover_letter = job_info
 
-        process_resume_file(downloaded_path, job_title)
+        process_resume_file(downloaded_path, job_title, cover_letter=cover_letter)
 
 if __name__ == "__main__":
     scan_drive_for_resumes()
