@@ -6,6 +6,7 @@ import openai
 import gspread
 import os
 import psycopg2
+import urllib.parse as up
 
 from itertools import dropwhile
 from oauth2client.service_account import ServiceAccountCredentials
@@ -185,13 +186,16 @@ def extract_section(text: str, section_header: str) -> str:
     return ' '.join(section_lines).strip()
     
 def save_to_postgresql(parsed_data, gpt_result, job_title):
-    conn = psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="resumescreener",
-        user="postgres",
-        password="urunenam!@#"
-    )
+    
+    # Read connection string from environment variable
+    db_url = os.getenv("DATABASE_URL")
+
+    # Parse connection string (required by psycopg2 in some cases)
+    up.uses_netloc.append("postgres")
+
+    # Connect using the full URL
+    conn = psycopg2.connect(db_url)
+
     cur = conn.cursor()
 
     def safe_val(x):
