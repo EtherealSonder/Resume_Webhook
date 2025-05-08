@@ -144,20 +144,20 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
     )
 
     prompt = (
-    "You are an experienced technical recruiter. You will be given:\n"
-    "- A job description\n"
-    "- Resume data\n"
-    "- An optional cover letter\n\n"
-    "Return a JSON object in the **exact** format below:\n\n"
-    "{\n"
-    "  \"score\": <integer from 0 to 100>,\n"
-    "  \"summary\": \"<2–4 sentence summary>\",\n"
-    "  \"strengths\": \"<bullet point list or short text>\",\n"
-    "  \"weaknesses\": \"<bullet point list or short text>\"\n"
-    "}\n\n"
-    f"### Job Description:\n{job_description.strip()}\n\n"
-    f"### Candidate Resume:\n{formatted_resume}\n"
-)
+                "You are an experienced technical recruiter. You will be given:\n"
+                "- A job description\n"
+                "- Resume data\n"
+                "- An optional cover letter\n\n"
+                "Return a JSON object in the **exact** format below:\n\n"
+                "{\n"
+                    "  \"score\": <integer from 0 to 100>,\n"
+                    "  \"summary\": \"<2–4 sentence summary>\",\n"
+                    "  \"strengths\": \"<bullet point list or short text>\",\n"
+                    "  \"weaknesses\": \"<bullet point list or short text>\"\n"
+                "}\n\n"
+                 f"### Job Description:\n{job_description.strip()}\n\n"
+                 f"### Candidate Resume:\n{formatted_resume}\n"
+             )
 
     if cover_letter:
         prompt += f"\n### Cover Letter:\n{cover_letter.strip()}\n"
