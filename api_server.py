@@ -4,6 +4,7 @@ from Resume_Parser import process_resume_file  # adjust if your import path is d
 import tempfile
 import os
 import logging
+import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,6 +41,25 @@ def parse_resume():
             os.unlink(file_path)
         except Exception as e:
             app.logger.warning(f"Could not delete temp file {file_path}: {e}")
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    email = data.get("email")
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM clients WHERE email = %s", (email,))
+    client = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if client:
+        return jsonify({"id": client[0], "name": client[1], "email": email})
+    else:
+        return jsonify({"error": "Client not found"}), 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
