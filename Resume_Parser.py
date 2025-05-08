@@ -185,23 +185,6 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
             "weaknesses": ""
         }
 
-
-
-def extract_section(text: str, section_header: str) -> str:
-    lines = text.splitlines()
-    capture = False
-    section_lines = []
-
-    for line in lines:
-        if line.lower().startswith(section_header.lower()):
-            capture = True
-            continue
-        elif capture and (line.strip() == "" or any(line.lower().startswith(h) for h in ["match score", "summary", "strength", "weakness"])):
-            break
-        elif capture:
-            section_lines.append(line.strip())
-
-    return ' '.join(section_lines).strip()
     
 def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url):
     
@@ -273,21 +256,16 @@ def main():
 def job_description_for(title):
     return job_descriptions.get(title, "No job description found.")
 
-def extract_field(text, key):
-    for line in text.splitlines():
-        if line.lower().startswith(key.lower()):
-            return line.split(":", 1)[-1].strip()
-    return ""
 
 def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter=""):
     parsed_resume = read_resume(file_path)
     job_description = job_description_for(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
 
-    score = extract_field(gpt_result, "Match Score")
-    summary = extract_field(gpt_result, "Summary")
-    strengths = extract_section(gpt_result, "Strengths")
-    weaknesses = extract_section(gpt_result, "Weaknesses")
+    score = gpt_result.get("score", "")
+    summary = gpt_result.get("summary", "")
+    strengths = gpt_result.get("strengths", "")
+    weaknesses = gpt_result.get("weaknesses", "")
 
     print("GPT Raw Result:\n", gpt_result)
     print("Extracted Score:", score)
