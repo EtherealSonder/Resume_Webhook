@@ -143,42 +143,47 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
         f"{key}: {value}" for key, value in candidate_info.items() if value
     )
 
-    # Base prompt
     prompt = (
-        "You are an experienced technical recruiter tasked with screening candidates for a job opening.\n"
-        "You will be given a job description, resume data, and optionally a cover letter.\n"
-        "Analyze and score the candidate using the rubric below.\n\n"
-
-        "### Scoring Rubric:\n"
-        "- Skills match: 40 points\n"
-        "- Relevant experience (years and domain): 30 points\n"
-        "- Certifications and education: 15 points\n"
-        "- Communication and motivation (from cover letter): 15 points\n"
-        "Total: 100 points\n\n"
-
-       "### Response Format:\n"
-        "Match Score: <score between 0 and 100>\n"
-        "Summary: <a 2 to 4 sentence explanation of why the candidate is or isn't a good fit>\n"
-        "Strengths: <list top 3 reasons they are a good match>\n"
-        "Weaknesses: <list top 3 reasons they may not be a good match>\n\n"
-        f"### Job Description:\n{job_description.strip()}\n\n"
-        f"### Candidate Resume:\n{formatted_resume}\n"
-    )
+    "You are an experienced technical recruiter. You will be given:\n"
+    "- A job description\n"
+    "- Resume data\n"
+    "- An optional cover letter\n\n"
+    "Return a JSON object in the **exact** format below:\n\n"
+    "{\n"
+    "  \"score\": <integer from 0 to 100>,\n"
+    "  \"summary\": \"<2–4 sentence summary>\",\n"
+    "  \"strengths\": \"<bullet point list or short text>\",\n"
+    "  \"weaknesses\": \"<bullet point list or short text>\"\n"
+    "}\n\n"
+    f"### Job Description:\n{job_description.strip()}\n\n"
+    f"### Candidate Resume:\n{formatted_resume}\n"
+)
 
     if cover_letter:
         prompt += f"\n### Cover Letter:\n{cover_letter.strip()}\n"
 
-    # Make the OpenAI API call
     response = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "You are a critical but fair technical recruiter who follows structured scoring and returns JSON."},
+            {"role": "system", "content": "You return valid JSON output only. No extra explanations."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.4
     )
 
-    return response.choices[0].message.content.strip()
+    # Try parsing JSON safely
+    import json
+    try:
+        return json.loads(response.choices[0].message.content.strip())
+    except Exception as e:
+        print("Failed to parse GPT output:", e)
+        print("Raw output:", response.choices[0].message.content)
+        return {
+            "score": 0,
+            "summary": "Could not parse GPT output.",
+            "strengths": "",
+            "weaknesses": ""
+        }
 
 
 
@@ -218,15 +223,11 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url):
     email = safe_val(parsed_data.get("email"))
     phone = safe_val(parsed_data.get("phone_number"))
 
-    score, summary = "", ""
-    for line in gpt_result.split("\n"):
-        if line.lower().startswith("match score") and not score:
-            score = float(line.split(":", 1)[-1].strip())
-        elif line.lower().startswith("summary") and not summary:
-            summary = line.split(":", 1)[-1].strip()
+    score = gpt_result.get("score", 0)
+    summary = gpt_result.get("summary", "")
+    strength = gpt_result.get("strengths", "")
+    weakness = gpt_result.get("weaknesses", "")
 
-    strength = extract_section(gpt_result, "Strengths:")
-    weakness = extract_section(gpt_result, "Weaknesses:")
 
     # Get job_id from title
     cur.execute("SELECT id FROM jobs WHERE job_title = %s LIMIT 1;", (job_title,))
@@ -288,12 +289,19 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
     strengths = extract_section(gpt_result, "Strengths")
     weaknesses = extract_section(gpt_result, "Weaknesses")
 
+    print("GPT Raw Result:\n", gpt_result)
+    print("Extracted Score:", score)
+    print("Extracted Strengths:", strengths)
+
+    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, "")
+    
     return {
         "score": score,
         "summary": summary,
         "strengths": strengths,
         "weaknesses": weaknesses
     }
+
 
     
 if __name__ == "__main__":
