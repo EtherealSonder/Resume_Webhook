@@ -1,3 +1,6 @@
+.env
+*.env
+backend_env/
 .vs/
 *.pdf
 resumes/
