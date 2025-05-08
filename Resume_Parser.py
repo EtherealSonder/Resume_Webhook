@@ -151,7 +151,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
                 "Return a JSON object in the **exact** format below:\n\n"
                 "{\n"
                     "  \"score\": <integer from 0 to 100>,\n"
-                    "  \"summary\": \"<2–4 sentence summary>\",\n"
+                    "  \"summary\": \"<2 4 sentence summary>\",\n"
                     "  \"strengths\": \"<bullet point list or short text>\",\n"
                     "  \"weaknesses\": \"<bullet point list or short text>\"\n"
                 "}\n\n"
