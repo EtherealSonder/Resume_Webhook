@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import mindee
 import openai
 import gspread
@@ -8,6 +11,7 @@ import os
 import psycopg2
 import urllib.parse as up
 import json 
+
 
 from itertools import dropwhile
 from oauth2client.service_account import ServiceAccountCredentials
@@ -154,7 +158,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
 
        "### Response Format:\n"
         "Match Score: <score between 0 and 100>\n"
-        "Summary: <a 2–4 sentence explanation of why the candidate is or isn't a good fit>\n"
+        "Summary: <a 2 to 4 sentence explanation of why the candidate is or isn't a good fit>\n"
         "Strengths: <list top 3 reasons they are a good match>\n"
         "Weaknesses: <list top 3 reasons they may not be a good match>\n\n"
         f"### Job Description:\n{job_description.strip()}\n\n"
@@ -268,19 +272,28 @@ def main():
 def job_description_for(title):
     return job_descriptions.get(title, "No job description found.")
 
+def extract_field(text, key):
+    for line in text.splitlines():
+        if line.lower().startswith(key.lower()):
+            return line.split(":", 1)[-1].strip()
+    return ""
 
-def process_resume_file(file_path: str,job_title="Unknown Role", resume_url="", cover_letter=""):
+def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter=""):
     parsed_resume = read_resume(file_path)
-    show_result(parsed_resume)
-    
     job_description = job_description_for(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
-    
-    print(f"\nProcessed: {file_path}\n")
-    print(gpt_result)
-    
-    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url)
 
+    score = extract_field(gpt_result, "Match Score")
+    summary = extract_field(gpt_result, "Summary")
+    strengths = extract_section(gpt_result, "Strengths")
+    weaknesses = extract_section(gpt_result, "Weaknesses")
+
+    return {
+        "score": score,
+        "summary": summary,
+        "strengths": strengths,
+        "weaknesses": weaknesses
+    }
 
     
 if __name__ == "__main__":
