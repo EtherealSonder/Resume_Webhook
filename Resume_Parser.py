@@ -186,7 +186,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
         }
 
     
-def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url):
+def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url,client_id):
     
     # Read connection string from environment variable
     db_url = os.getenv("DATABASE_URL")
@@ -213,11 +213,11 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url):
 
 
     # Get job_id from title
-    cur.execute("SELECT id FROM jobs WHERE job_title = %s LIMIT 1;", (job_title,))
+    cur.execute("SELECT id FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
     job_row = cur.fetchone()
     if not job_row:
-        cur.execute("INSERT INTO jobs (job_title, job_description) VALUES (%s, %s) RETURNING id;",
-                    (job_title, "Placeholder description"))
+        cur.execute("INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
+                    (job_title, "Placeholder description", client_id))
         job_id = cur.fetchone()[0]
     else:
         job_id = job_row[0]
@@ -257,7 +257,7 @@ def job_description_for(title):
     return job_descriptions.get(title, "No job description found.")
 
 
-def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter=""):
+def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="",client_id=""):
     parsed_resume = read_resume(file_path)
     job_description = job_description_for(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
@@ -271,7 +271,7 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
     print("Extracted Score:", score)
     print("Extracted Strengths:", strengths)
 
-    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, "")
+    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, "",client_id)
     
     return {
         "score": score,

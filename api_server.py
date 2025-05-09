@@ -20,7 +20,8 @@ def parse_resume():
     file = request.files.get("resume")
     job_title = request.form.get("job_title")
     cover_letter = request.form.get("cover_letter", "")
-
+    client_id = request.form.get("client_id")
+    
     if not file or not job_title:
         return jsonify({"error": "Missing required fields."}), 400
 
@@ -30,7 +31,7 @@ def parse_resume():
         file.save(file_path)
 
     try:
-        result = process_resume_file(file_path, job_title, cover_letter)
+        result = process_resume_file(file_path, job_title, cover_letter, client_id)
         return jsonify(result)
     except Exception as e:
         app.logger.error(f"Exception in /parse_resume: {e}", exc_info=True)
