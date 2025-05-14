@@ -22,24 +22,6 @@ from datetime import datetime
 
 
 
-job_descriptions = {
-    "Frontend Developer": "We are hiring a Frontend Developer skilled in HTML, CSS, JavaScript, and frameworks like React or Vue. The ideal candidate should have experience with responsive design, RESTful APIs, and basic testing tools.",
-    "Full Stack Developer": "Seeking a Full Stack Developer proficient in both frontend (React, Angular) and backend (Node.js, Django, or Express) technologies. Must be comfortable with databases like MongoDB or PostgreSQL, version control, and CI/CD pipelines.",
-    "Machine Learning Engineer": "Looking for a Machine Learning Engineer with solid Python skills, experience with ML frameworks like TensorFlow or PyTorch, and knowledge of model evaluation and deployment techniques. Data preprocessing and statistical understanding are key.",
-    "DevOps Engineer": "We need a DevOps Engineer with experience in CI/CD, Docker, Kubernetes, and cloud platforms like AWS or Azure. Knowledge of scripting (Bash, Python), infrastructure as code, and system monitoring is essential.",
-    "AI Research Intern": "We are looking for an AI Research Intern with familiarity in Python, deep learning frameworks, and a strong academic foundation in machine learning or AI. Should be able to assist in experiments, research papers, and prototyping.",
-    "Game Designer": "Hiring a Game Designer to conceptualize mechanics, levels, and player progression. Should be familiar with Unity or Unreal, basic scripting, and player psychology. Creative problem-solving is essential.",
-    "Unity Technical Artist": "We are hiring a Unity Technical Artist skilled in Unity, shader development, optimization, and animation pipelines. Should be able to bridge the gap between art and code and work closely with artists and developers.",
-    "Unreal Engine Developer": "Seeking an Unreal Engine Developer with C++ and Blueprints experience. Should have knowledge of real-time rendering, gameplay scripting, and performance optimization for PC and console.",
-    "Cloud Engineer (AWS/GCP)": "We are hiring a Cloud Engineer experienced in AWS or GCP services including EC2, S3, Cloud Functions, and IAM. Should have infrastructure as code experience (Terraform, CloudFormation) and system security knowledge.",
-    "Mobile App Developer": "Looking for a Mobile App Developer proficient in Android (Kotlin/Java) or iOS (Swift). Cross-platform experience with Flutter or React Native is a plus. Must understand UI/UX guidelines and mobile APIs.",
-    "Computer Vision Engineer": "Seeking a Computer Vision Engineer skilled in Python, OpenCV, and deep learning libraries. Should have experience with object detection, segmentation, and real-time image processing.",
-    "NLP Engineer": "Hiring an NLP Engineer with knowledge of NLTK, spaCy, transformers, and experience with text classification, sentiment analysis, and language modeling.",
-    "QA Automation Engineer": "We are hiring a QA Automation Engineer proficient in Selenium, pytest, or Cypress. Should have experience designing test cases, writing scripts, and maintaining automation frameworks.",
-    "Business Intelligence Analyst": "Looking for a BI Analyst experienced in SQL, data visualization tools like Power BI or Tableau, and business metrics. Should be able to prepare dashboards, reports, and work closely with stakeholders.",
-    "Web Developer": "We are hiring a Web Developer skilled in HTML, CSS, JavaScript, and frameworks like Bootstrap or Tailwind. Should have experience with backend basics, hosting, and SEO-friendly development."
-}
-
 
 mindee_api_key = os.getenv("MINDEE_API_KEY")
 mindee_client = mindee.Client(api_key=mindee_api_key)
@@ -174,7 +156,9 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
     # Try parsing JSON safely
     import json
     try:
-        return json.loads(response.choices[0].message.content.strip())
+        gpt_data = json.loads(response.choices[0].message.content.strip())
+        gpt_data["experience_years"] = experience_years 
+        return gpt_data
     except Exception as e:
         print("Failed to parse GPT output:", e)
         print("Raw output:", response.choices[0].message.content)
@@ -208,7 +192,10 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url,client_id)
 
     score = gpt_result.get("score", 0)
     summary = gpt_result.get("summary", "")
+    experience_years = gpt_result.get("experience_years", 0.0)
+    experience_years = float(experience_years) if experience_years else 0.0
     strength = gpt_result.get("strengths", "")
+    
     weakness = gpt_result.get("weaknesses", "")
 
 
@@ -232,14 +219,17 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url,client_id)
     strength = str(strength or "")
     weakness = str(weakness or "")
 
-    # Insert or update resume row
     cur.execute("""
-        INSERT INTO resumes (job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (email, job_id) DO UPDATE 
-        SET phone = EXCLUDED.phone, score = EXCLUDED.score, summary = EXCLUDED.summary,
-            strengths = EXCLUDED.strengths, weaknesses = EXCLUDED.weaknesses;
-    """, (job_id, name, email, phone, resume_url, score, summary, strength, weakness))
+    INSERT INTO resumes (job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses, experience_years)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (email, job_id) DO UPDATE 
+    SET phone = EXCLUDED.phone,
+        score = EXCLUDED.score,
+        summary = EXCLUDED.summary,
+        strengths = EXCLUDED.strengths,
+        weaknesses = EXCLUDED.weaknesses,
+        experience_years = EXCLUDED.experience_years;
+""", (job_id, name, email, phone, resume_url, score, summary, strength, weakness, experience_years))
 
     print(f"Saving to PostgreSQL: {name}, {email}, Job: {job_title}")
 
@@ -253,14 +243,12 @@ def main():
     process_resume_file(resume_path)
     
 
-def job_description_for(title):
-    return job_descriptions.get(title, "No job description found.")
-
 
 def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="",client_id=""):
     parsed_resume = read_resume(file_path)
-    job_description = job_description_for(job_title)
+    job_description = get_job_description_from_db(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
+    experience_years = gpt_result.get("experience_years", 0.0)
 
     score = gpt_result.get("score", "")
     summary = gpt_result.get("summary", "")
@@ -277,10 +265,22 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
         "score": score,
         "summary": summary,
         "strengths": strengths,
-        "weaknesses": weaknesses
+        "weaknesses": weaknesses,
+        "experience_years": experience_years
     }
 
+def get_job_description_from_db(job_title):
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute("SELECT job_description FROM jobs WHERE job_title = %s LIMIT 1;", (job_title,))
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
 
+    if result:
+        return result[0]
+    else:
+        return "No job description available."
     
 if __name__ == "__main__":
     main()
