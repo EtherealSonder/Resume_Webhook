@@ -116,6 +116,10 @@ def login():
 
 @app.route("/candidates", methods=["GET"])
 def get_candidates():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
@@ -123,8 +127,9 @@ def get_candidates():
             SELECT r.candidate_name, r.email, r.score, r.experience_years, j.job_title
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
             ORDER BY r.score DESC;
-        """)
+        """, (client_id,))
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -147,17 +152,27 @@ def get_candidates():
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), AVG(score) FROM resumes;")
-        count, avg = cur.fetchone()
+        cur.execute("""
+            SELECT COUNT(*), AVG(score), AVG(experience_years)
+            FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s;
+        """, (client_id,))
+        count, avg_score, avg_exp = cur.fetchone()
         cur.close()
         conn.close()
 
         return jsonify({
             "totalCandidates": count or 0,
-            "averageScore": round(avg or 0, 2)
+            "averageScore": round(avg_score or 0, 2),
+            "averageExperience": round(avg_exp or 0, 2)
         })
 
     except Exception as e:
@@ -166,10 +181,14 @@ def dashboard():
 
 @app.route("/jobs", methods=["GET"])
 def jobs():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("SELECT job_title FROM jobs;")
+        cur.execute("SELECT job_title FROM jobs WHERE client_id = %s;", (client_id,))
         titles = cur.fetchall()
         cur.close()
         conn.close()
@@ -179,16 +198,31 @@ def jobs():
     except Exception as e:
         logging.exception("Error in /jobs")
         return jsonify({"error": str(e)}), 500
-
+    
 @app.route("/statistics", methods=["GET"])
 def statistics():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("SELECT job_title, COUNT(*) FROM resumes r JOIN jobs j ON r.job_id = j.id GROUP BY job_title;")
+        cur.execute("""
+            SELECT job_title, COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
+            GROUP BY job_title;
+        """, (client_id,))
         job_dist = cur.fetchall()
-        cur.execute("SELECT AVG(score) FROM resumes;")
+
+        cur.execute("""
+            SELECT AVG(score) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s;
+        """, (client_id,))
         avg_score = cur.fetchone()[0]
+
         cur.close()
         conn.close()
 
@@ -200,6 +234,7 @@ def statistics():
     except Exception as e:
         logging.exception("Error in /statistics")
         return jsonify({"error": str(e)}), 500
+    
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
