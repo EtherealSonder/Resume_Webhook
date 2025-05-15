@@ -196,43 +196,129 @@ def statistics():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
 
+        # Job volume chart
         cur.execute("""
-            SELECT job_title, COUNT(*) FROM resumes r
+            SELECT j.job_title, COUNT(*) FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
-            GROUP BY job_title;
+            GROUP BY j.job_title;
         """, (client_id,))
-        job_dist = cur.fetchall()
+        job_dist = [{"title": row[0] or "Unknown", "count": row[1]} for row in cur.fetchall()]
 
+        # Education breakdown
         cur.execute("""
-            SELECT education_level, COUNT(*) FROM resumes r
+            SELECT r.education_level, COUNT(*) FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
-            GROUP BY education_level;
+            GROUP BY r.education_level;
         """, (client_id,))
-        edu_dist = cur.fetchall()
+        edu_pie = [{"level": row[0] or "Unknown", "count": row[1]} for row in cur.fetchall()]
 
+        # Application timeline
         cur.execute("""
-            SELECT DATE(application_date), COUNT(*) FROM resumes r
+            SELECT DATE(r.application_date), COUNT(*) FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
-            GROUP BY DATE(application_date)
-            ORDER BY DATE(application_date);
+            GROUP BY DATE(r.application_date)
+            ORDER BY DATE(r.application_date);
         """, (client_id,))
-        timeline = cur.fetchall()
+        timeline = [{"date": str(row[0]), "count": row[1]} for row in cur.fetchall()]
+
+        # Score vs Experience (scatter)
+        cur.execute("""
+            SELECT r.experience_years, r.score, j.job_title FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s;
+        """, (client_id,))
+        score_exp = [
+            {
+                "experience": float(row[0]) if row[0] is not None else 0.0,
+                "score": float(row[1]) if row[1] is not None else 0.0,
+                "job_title": row[2]
+            }
+            for row in cur.fetchall()
+        ]
+
+        # Cover letter authenticity pie
+        cur.execute("""
+            SELECT r.cover_letter_flag, COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
+            GROUP BY r.cover_letter_flag;
+        """, (client_id,))
+        cover_pie = [
+            {"label": "Likely Fake" if row[0] else "Likely Real", "value": row[1]}
+            for row in cur.fetchall()
+        ]
 
         cur.close()
         conn.close()
 
         return jsonify({
-            "jobDistribution": {row[0]: row[1] for row in job_dist},
-            "educationBreakdown": {row[0]: row[1] for row in edu_dist},
-            "applicationTimeline": [{"date": str(row[0]), "count": row[1]} for row in timeline]
+            "jobDistribution": job_dist,
+            "educationPie": edu_pie,
+            "applicationTrends": timeline,
+            "scoreExperiencePlot": score_exp,
+            "authenticityPie": cover_pie
         })
 
     except Exception as e:
         logging.exception("Error in /statistics")
         return jsonify({"error": str(e)}), 500
+
+@app.route("/jobs", methods=["GET"])
+def get_jobs():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify([])
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("SELECT id, job_title, job_description FROM jobs WHERE client_id = %s", (client_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return jsonify([
+            {"id": r[0], "title": r[1], "description": r[2]} for r in rows
+        ])
+
+    except Exception as e:
+        logging.exception("Error in /jobs")
+        return jsonify([])
+
+
+@app.route("/jobs/create", methods=["POST"])
+def create_job():
+    data = request.get_json()
+    title = data.get("title")
+    description = data.get("description")
+    client_id = data.get("client_id")
+
+    if not all([title, description, client_id]):
+        return jsonify({"error": "Missing fields"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO jobs (job_title, job_description, client_id)
+            VALUES (%s, %s, %s) RETURNING id;
+        """, (title, description, client_id))
+        job_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Job created", "job_id": job_id})
+
+    except Exception as e:
+        logging.exception("Error in /jobs/create")
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
