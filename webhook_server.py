@@ -3,7 +3,6 @@ import json
 import requests
 import os
 import traceback
-
 from Resume_Parser import process_resume_file
 
 app = Flask(__name__)
@@ -21,10 +20,7 @@ def download_from_drive(share_link):
     download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
     local_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.pdf")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+    headers = {"User-Agent": "Mozilla/5.0"}
     with requests.get(download_url, headers=headers, stream=True) as r:
         if "text/html" in r.headers.get("Content-Type", ""):
             raise ValueError("Google Drive file is not publicly accessible or not a PDF.")
@@ -34,7 +30,6 @@ def download_from_drive(share_link):
 
     return local_path
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -43,14 +38,16 @@ def webhook():
 
     file_url = data.get("resume_url", "")
     job_title = data.get("job_title", "")
+    cover_letter = data.get("cover_letter", "")
+    client_id = data.get("client_id", "")
 
     try:
         local_path = download_from_drive(file_url)
-        process_resume_file(local_path, job_title, file_url)
+        process_resume_file(local_path, job_title, cover_letter, client_id, resume_source="webhook")
         return "Resume downloaded and processed", 200
     except Exception as e:
         print("Error:", e)
-        traceback.print_exc() 
+        traceback.print_exc()
         return f"Error: {str(e)}", 500
 
 if __name__ == "__main__":

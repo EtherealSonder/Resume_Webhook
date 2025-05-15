@@ -7,6 +7,7 @@ import logging
 import psycopg2
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 
 load_dotenv()
 
@@ -64,7 +65,7 @@ def parse_resume():
         return jsonify({"error": "Invalid job ID"}), 400
 
     job_title, client_id = row
-    result = process_resume_file(file_path, job_title, cover_letter, client_id)
+    result = process_resume_file(file_path, job_title, cover_letter, client_id, resume_source="form")
     os.unlink(file_path)
     return jsonify(result)
 
@@ -124,7 +125,8 @@ def get_candidates():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
         cur.execute("""
-            SELECT r.candidate_name, r.email, r.score, r.experience_years, j.job_title
+            SELECT r.candidate_name, r.email, r.score, r.experience_years, j.job_title,
+                   r.education_level, r.skills_matched_pct, r.certifications, r.cover_letter_flag
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -140,7 +142,11 @@ def get_candidates():
                 "email": row[1],
                 "score": row[2],
                 "experience": row[3],
-                "job_title": row[4]
+                "job_title": row[4],
+                "education": row[5],
+                "skill_match": row[6],
+                "certifications": row[7],
+                "cover_letter_flag": row[8]
             }
             for row in rows
         ]
@@ -160,45 +166,26 @@ def dashboard():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
         cur.execute("""
-            SELECT COUNT(*), AVG(score), AVG(experience_years)
+            SELECT COUNT(*), AVG(score), AVG(experience_years), AVG(skills_matched_pct)
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s;
         """, (client_id,))
-        count, avg_score, avg_exp = cur.fetchone()
+        count, avg_score, avg_exp, avg_skill = cur.fetchone()
         cur.close()
         conn.close()
 
         return jsonify({
             "totalCandidates": count or 0,
             "averageScore": round(avg_score or 0, 2),
-            "averageExperience": round(avg_exp or 0, 2)
+            "averageExperience": round(avg_exp or 0, 2),
+            "averageSkillMatch": round(avg_skill or 0, 2)
         })
 
     except Exception as e:
         logging.exception("Error in /dashboard")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/jobs", methods=["GET"])
-def jobs():
-    client_id = request.args.get("client_id")
-    if not client_id:
-        return jsonify({"error": "Missing client_id"}), 400
-
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-        cur = conn.cursor()
-        cur.execute("SELECT job_title FROM jobs WHERE client_id = %s;", (client_id,))
-        titles = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        return jsonify([{"title": row[0]} for row in titles])
-
-    except Exception as e:
-        logging.exception("Error in /jobs")
-        return jsonify({"error": str(e)}), 500
-    
 @app.route("/statistics", methods=["GET"])
 def statistics():
     client_id = request.args.get("client_id")
@@ -208,6 +195,7 @@ def statistics():
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
+
         cur.execute("""
             SELECT job_title, COUNT(*) FROM resumes r
             JOIN jobs j ON r.job_id = j.id
@@ -217,24 +205,34 @@ def statistics():
         job_dist = cur.fetchall()
 
         cur.execute("""
-            SELECT AVG(score) FROM resumes r
+            SELECT education_level, COUNT(*) FROM resumes r
             JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s;
+            WHERE j.client_id = %s
+            GROUP BY education_level;
         """, (client_id,))
-        avg_score = cur.fetchone()[0]
+        edu_dist = cur.fetchall()
+
+        cur.execute("""
+            SELECT DATE(application_date), COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
+            GROUP BY DATE(application_date)
+            ORDER BY DATE(application_date);
+        """, (client_id,))
+        timeline = cur.fetchall()
 
         cur.close()
         conn.close()
 
         return jsonify({
             "jobDistribution": {row[0]: row[1] for row in job_dist},
-            "averageScore": round(avg_score or 0, 2)
+            "educationBreakdown": {row[0]: row[1] for row in edu_dist},
+            "applicationTimeline": [{"date": str(row[0]), "count": row[1]} for row in timeline]
         })
 
     except Exception as e:
         logging.exception("Error in /statistics")
         return jsonify({"error": str(e)}), 500
-    
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
