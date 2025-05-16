@@ -1,23 +1,18 @@
 # -*- coding: utf-8 -*-
-
 from dotenv import load_dotenv
 load_dotenv()
 
 import mindee
 import openai
-import gspread
 import os
 import psycopg2
 import urllib.parse as up
 import json
 from datetime import datetime
 from typing import Dict, Any, List
-from itertools import dropwhile
-from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 from mindee import Client, AsyncPredictResponse, product
 
-# Initialize APIs
 mindee_api_key = os.getenv("MINDEE_API_KEY")
 mindee_client = mindee.Client(api_key=mindee_api_key)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -97,6 +92,28 @@ def check_cover_letter_authenticity(cover_letter: str) -> bool:
     except:
         return False
 
+def extract_links_from_text(text: str) -> Dict[str, str]:
+    links = {"portfolio_url": "", "github_url": "", "linkedin_url": ""}
+    for line in text.splitlines():
+        if "github.com" in line:
+            links["github_url"] = line.strip()
+        elif "linkedin.com" in line:
+            links["linkedin_url"] = line.strip()
+        elif "http" in line and not any(k in line for k in ["github.com", "linkedin.com"]):
+            links["portfolio_url"] = line.strip()
+    return links
+
+def compute_resume_quality_score(text: str) -> int:
+    length = len(text.split())
+    score = 0
+    if 300 < length < 1500:
+        score += 50
+    if any(word in text.lower() for word in ["experience", "education", "skills"]):
+        score += 25
+    if "objective" not in text.lower():
+        score += 25
+    return min(score, 100)
+
 def format_list(items: List[Any]) -> str:
     safe_items = []
     for item in items:
@@ -132,6 +149,9 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
         f"{k}: {get_value(v)}" for k, v in resume_data.items()
     ])
 
+    links = extract_links_from_text(formatted_resume)
+    quality_score = compute_resume_quality_score(formatted_resume)
+
     prompt = f"""
     You are an experienced technical recruiter. You will be given:
     - A job description
@@ -145,7 +165,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
       "strengths": "<points>",
       "weaknesses": "<points>"
     }}
-    
+
     ### Job Description:
     {job_description.strip()}
 
@@ -170,7 +190,11 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
             "education_level": education_level,
             "skills_matched_pct": skill_match_pct,
             "certifications": format_list(certifications_list),
-            "cover_letter_flag": cover_letter_flag
+            "cover_letter_flag": cover_letter_flag,
+            "technical_skills": skills_list,
+            "soft_skills": soft_skills.values if soft_skills else [],
+            "resume_quality_score": quality_score,
+            **links
         })
         return gpt_data
     except Exception as e:
@@ -189,15 +213,6 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     name = safe_val(parsed_data.get("full_name"))
     email = safe_val(parsed_data.get("email"))
     phone = safe_val(parsed_data.get("phone_number"))
-    experience_years = float(gpt_result.get("experience_years", 0.0))
-    education_level = gpt_result.get("education_level")
-    skills_matched_pct = gpt_result.get("skills_matched_pct")
-    certifications = gpt_result.get("certifications")
-    cover_letter_flag = gpt_result.get("cover_letter_flag")
-    score = float(gpt_result.get("score", 0.0))
-    summary = gpt_result.get("summary", "")
-    strengths = gpt_result.get("strengths", "")
-    weaknesses = gpt_result.get("weaknesses", "")
 
     cur.execute("SELECT id FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
     job_row = cur.fetchone()
@@ -210,8 +225,9 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
 
     cur.execute("""
     INSERT INTO resumes (job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
-        experience_years, education_level, skills_matched_pct, certifications, cover_letter_flag, resume_source)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        experience_years, education_level, skills_matched_pct, certifications, cover_letter_flag, resume_source,
+        portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (email, job_id) DO UPDATE
     SET phone = EXCLUDED.phone,
         score = EXCLUDED.score,
@@ -223,9 +239,21 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         skills_matched_pct = EXCLUDED.skills_matched_pct,
         certifications = EXCLUDED.certifications,
         cover_letter_flag = EXCLUDED.cover_letter_flag,
-        resume_source = EXCLUDED.resume_source;
-    """, (job_id, name, email, phone, resume_url, score, summary, strengths, weaknesses,
-          experience_years, education_level, skills_matched_pct, certifications, cover_letter_flag, resume_source))
+        resume_source = EXCLUDED.resume_source,
+        portfolio_url = EXCLUDED.portfolio_url,
+        github_url = EXCLUDED.github_url,
+        linkedin_url = EXCLUDED.linkedin_url,
+        technical_skills = EXCLUDED.technical_skills,
+        soft_skills = EXCLUDED.soft_skills,
+        resume_quality_score = EXCLUDED.resume_quality_score;
+    """, (
+        job_id, name, email, phone, resume_url, gpt_result["score"], gpt_result["summary"],
+        gpt_result["strengths"], gpt_result["weaknesses"], gpt_result["experience_years"],
+        gpt_result["education_level"], gpt_result["skills_matched_pct"], gpt_result["certifications"],
+        gpt_result["cover_letter_flag"], resume_source, gpt_result["portfolio_url"],
+        gpt_result["github_url"], gpt_result["linkedin_url"], gpt_result["technical_skills"],
+        gpt_result["soft_skills"], gpt_result["resume_quality_score"]
+    ))
 
     conn.commit()
     cur.close()
@@ -240,11 +268,11 @@ def get_job_description_from_db(job_title):
     conn.close()
     return result[0] if result else "No job description available."
 
-def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="", client_id="", resume_source="form"):
+def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="", client_id="", resume_source="form", resume_url=""):
     parsed_resume = read_resume(file_path)
     job_description = get_job_description_from_db(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
-    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, file_path, client_id, resume_source)
+    save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url, client_id, resume_source)
     return gpt_result
 
 if __name__ == "__main__":

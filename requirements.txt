@@ -10,3 +10,4 @@ psycopg2-binary
 flask
 flask-cors
 python-dotenv
+boto3

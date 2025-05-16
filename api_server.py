@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from Resume_Parser import process_resume_file
+from s3_utils import upload_to_s3 
 import tempfile
 import os
 import logging
@@ -61,11 +62,18 @@ def parse_resume():
     row = cur.fetchone()
     cur.close()
     conn.close()
+
     if not row:
         return jsonify({"error": "Invalid job ID"}), 400
 
     job_title, client_id = row
-    result = process_resume_file(file_path, job_title, cover_letter, client_id, resume_source="form")
+
+    try:
+        s3_url = upload_to_s3(file_path, job_id, resume_file.filename)
+    except Exception as e:
+        return jsonify({"error": f"S3 upload failed: {str(e)}"}), 500
+
+    result = process_resume_file(file_path, job_title, cover_letter, client_id, resume_source="form", resume_url=s3_url)
     os.unlink(file_path)
     return jsonify(result)
 
@@ -317,7 +325,46 @@ def create_job():
         logging.exception("Error in /jobs/create")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/jobs/<int:job_id>", methods=["PATCH"])
+def update_job(job_id):
+    data = request.get_json()
+    title = data.get("title")
+    description = data.get("description")
 
+    if not all([title, description]):
+        return jsonify({"error": "Missing fields"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE jobs
+            SET job_title = %s, job_description = %s
+            WHERE id = %s
+        """, (title, description, job_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Job updated successfully"})
+    except Exception as e:
+        logging.exception("Error in PATCH /jobs")
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/jobs/<int:job_id>", methods=["DELETE"])
+def delete_job(job_id):
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Job deleted successfully"})
+    except Exception as e:
+        logging.exception("Error in DELETE /jobs")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

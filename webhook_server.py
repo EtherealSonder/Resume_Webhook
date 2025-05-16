@@ -4,6 +4,8 @@ import requests
 import os
 import traceback
 from Resume_Parser import process_resume_file
+from s3_utils import upload_to_s3  
+from datetime import datetime
 
 app = Flask(__name__)
 DOWNLOAD_DIR = "resumes"
@@ -28,7 +30,7 @@ def download_from_drive(share_link):
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    return local_path
+    return local_path, f"{file_id}.pdf"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -42,9 +44,20 @@ def webhook():
     client_id = data.get("client_id", "")
 
     try:
-        local_path = download_from_drive(file_url)
-        process_resume_file(local_path, job_title, cover_letter, client_id, resume_source="webhook")
-        return "Resume downloaded and processed", 200
+        local_path, filename = download_from_drive(file_url)
+
+        
+        s3_url = upload_to_s3(local_path, job_id="webhook", original_name=filename)
+
+        process_resume_file(
+            file_path=local_path,
+            job_title=job_title,
+            cover_letter=cover_letter,
+            client_id=client_id,
+            resume_source="webhook",
+            resume_url=s3_url
+        )
+        return "Resume downloaded, uploaded to S3, and processed", 200
     except Exception as e:
         print("Error:", e)
         traceback.print_exc()
