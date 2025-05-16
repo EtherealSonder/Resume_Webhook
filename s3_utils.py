@@ -24,8 +24,8 @@ def upload_to_s3(file_path: str, job_id: str, original_name: str) -> str:
             Filename=file_path,
             Bucket=AWS_BUCKET,
             Key=filename,
-            ExtraArgs={"ACL": "public-read", "ContentType": "application/pdf"}
-        )
+            ExtraArgs={"ContentType": "application/pdf"}
+         )
         url = f"https://{AWS_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{filename}"
         return url
     except NoCredentialsError:

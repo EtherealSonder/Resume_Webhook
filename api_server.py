@@ -134,7 +134,7 @@ def get_candidates():
         cur = conn.cursor()
         cur.execute("""
             SELECT r.candidate_name, r.email, r.score, r.experience_years, j.job_title,
-                   r.education_level, r.skills_matched_pct, r.certifications, r.cover_letter_flag
+                   r.education_level, r.skills_matched_pct, r.certifications, r.cover_letter_report
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -154,7 +154,7 @@ def get_candidates():
                 "education": row[5],
                 "skill_match": row[6],
                 "certifications": row[7],
-                "cover_letter_flag": row[8]
+                "cover_letter_report": row[8] if row[8] else "Not Provided"
             }
             for row in rows
         ]
@@ -163,6 +163,7 @@ def get_candidates():
     except Exception as e:
         logging.exception("Error fetching candidates")
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -247,17 +248,23 @@ def statistics():
             for row in cur.fetchall()
         ]
 
-        # Cover letter authenticity pie
+        # Cover letter authenticity pie based on report presence
         cur.execute("""
-            SELECT r.cover_letter_flag, COUNT(*) FROM resumes r
+            SELECT
+              CASE
+                WHEN r.cover_letter_report IS NULL OR TRIM(r.cover_letter_report) = ''
+                  THEN 'No Cover Letter'
+                WHEN POSITION('AI' IN r.cover_letter_report) > 0 OR POSITION('fabricated' IN r.cover_letter_report) > 0
+                  THEN 'Suspicious / Likely AI'
+                ELSE 'Authentic / Real'
+              END AS label,
+              COUNT(*)
+            FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
-            GROUP BY r.cover_letter_flag;
+            GROUP BY label;
         """, (client_id,))
-        cover_pie = [
-            {"label": "Likely Fake" if row[0] else "Likely Real", "value": row[1]}
-            for row in cur.fetchall()
-        ]
+        cover_pie = [{"label": row[0], "value": row[1]} for row in cur.fetchall()]
 
         cur.close()
         conn.close()
@@ -273,6 +280,7 @@ def statistics():
     except Exception as e:
         logging.exception("Error in /statistics")
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/jobs", methods=["GET"])
 def get_jobs():
@@ -295,6 +303,24 @@ def get_jobs():
     except Exception as e:
         logging.exception("Error in /jobs")
         return jsonify([])
+
+@app.route("/jobs/<int:job_id>", methods=["GET"])
+def get_job_by_id(job_id):
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute("SELECT id, job_title, job_description FROM jobs WHERE id = %s;", (job_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if row:
+        return {
+            "id": row[0],
+            "job_title": row[1],
+            "job_description": row[2]
+        }
+    else:
+        return {"error": "Job not found"}, 404
 
 
 @app.route("/jobs/create", methods=["POST"])
