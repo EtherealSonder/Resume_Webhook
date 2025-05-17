@@ -152,43 +152,60 @@ def compute_skill_match(resume_skills: List[str], job_description: str) -> float
     score = (matched_skills / len(resume_skills)) * 100
     return round(score, 2)
 
-def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> str:
+def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> dict:
     if not cover_letter.strip():
-        return "No cover letter provided."
+        return {
+            "analysis": "No cover letter provided.",
+            "issues": [],
+            "recommendation": "Cover letter missing - request one from candidate.",
+            "ai_probability": 0
+        }
 
     prompt = f"""
-    You are a recruiter AI that detects inconsistencies or fake claims in cover letters.
+You are a recruiter AI that detects inconsistencies or fake claims in cover letters.
 
-    Given:
-    - Resume (used as source of truth)
-    - Cover Letter (provided by candidate)
+Given:
+- Resume (used as source of truth)
+- Cover Letter (provided by candidate)
 
-    Tasks:
-    1. Identify if the cover letter is consistent with the resume.
-    2. Highlight any fabricated, exaggerated, or unverifiable claims.
-    3. Evaluate how likely it is that the cover letter was written by an AI (in %).
-    4. Return a professional report in plain text.
+Tasks:
+1. Write a short summary of whether the cover letter aligns with the resume.
+2. List any exaggerated, fabricated, or unverifiable claims.
+3. Estimate the likelihood (0 to 100 percent) that the cover letter was AI-generated.
+4. Suggest whether this cover letter seems trustworthy or not.
 
-    ### Resume:
-    {resume_text.strip()}
+Return response as structured JSON with keys:
+- analysis
+- issues (list)
+- ai_probability
+- recommendation
 
-    ### Cover Letter:
-    {cover_letter.strip()}
-    """
+### Resume:
+{resume_text.strip()}
+
+### Cover Letter:
+{cover_letter.strip()}
+"""
 
     try:
+        import json
         response = openai_client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "Return only your analysis, do not wrap in JSON or bullet list."},
+                {"role": "system", "content": "Return only the valid JSON object. No prose, no comments."},
                 {"role": "user", "content": prompt}
             ]
         )
-        return response.choices[0].message.content.strip()
+        return json.loads(response.choices[0].message.content.strip())
     except Exception as e:
         print("Error analyzing cover letter:", e)
-        return "Analysis failed due to an error."
-
+        return {
+            "analysis": "Analysis failed due to an error.",
+            "issues": [],
+            "recommendation": "Unable to verify authenticity.",
+            "ai_probability": -1
+        }
+    
 
 def extract_links_from_text(text: str) -> Dict[str, str]:
     links = {"portfolio_url": "", "github_url": "", "linkedin_url": ""}
@@ -299,9 +316,11 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
     quality_score = compute_resume_quality_score(resume_text)
     soft_skills_inferred = extract_soft_skills(resume_text, cover_letter)
     links = extract_links_from_text(resume_text)
-    cover_letter_report = analyze_cover_letter_authenticity(resume_text, cover_letter)
+    cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
+    cover_letter_report = cover_letter_analysis_dict.get("analysis", "")
+    ai_score = cover_letter_analysis_dict.get("ai_probability", 0)
 
-    # GPT prompt
+    # GPT evaluation prompt
     prompt = f"""
 You are an advanced technical recruiter AI.
 
@@ -310,17 +329,14 @@ Your task is to evaluate a resume and cover letter against a job description, an
 - A short summary explaining *why* the candidate is a good fit
 - Key strengths (if any)
 - Weaknesses (if any)
-If no strengths or weaknesses are obvious, leave the field empty.
 
 SCORING RUBRIC:
-- Resume Quality (formatting, clarity, layout): {quality_score}/100 (weight: 20%)
-- Years of Relevant Experience: {experience_years} (weight: 20%)
-- Skill Match: {skill_match_pct}% (weight: 25%)
-- Education Level: {education_level} (weight: 15%)
-- Soft Skills/Communication (based on resume & cover letter): (weight: 10%)
-- Certifications or Industry Tools: (weight: 10%)
-
-Calculate the final score as a weighted average of the above.
+- Resume Quality (formatting, clarity, layout): {quality_score}/100 (20%)
+- Years of Relevant Experience: {experience_years} (20%)
+- Skill Match: {skill_match_pct}% (25%)
+- Education Level: {education_level} (15%)
+- Soft Skills: (10%)
+- Certifications or Industry Tools: (10%)
 
 ### Job Description:
 {job_description.strip()}
@@ -328,39 +344,40 @@ Calculate the final score as a weighted average of the above.
 ### Resume:
 {resume_text.strip()}
 """
-
     if cover_letter:
         prompt += f"\n### Cover Letter:\n{cover_letter.strip()}"
 
     response = openai_client.chat.completions.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "You are an expert resume evaluator. Return a valid JSON with keys: score, summary, strengths, weaknesses."},
+            {
+                "role": "system",
+                "content": "You are an expert resume evaluator. Return a valid JSON with keys: score, summary, strengths, weaknesses."
+            },
             {"role": "user", "content": prompt}
         ]
     )
 
     try:
-        try:
-            gpt_data = json.loads(response.choices[0].message.content.strip())
-        except json.JSONDecodeError as e:
-            print("GPT response is not valid JSON:\n", response.choices[0].message.content)
-            raise e
+        gpt_data = json.loads(response.choices[0].message.content.strip())
 
-        # Ensure all required keys exist
+        # Ensure fallback keys
         for key in [
+            "score", "summary", "strengths", "weaknesses",
             "experience_years", "education_level", "skills_matched_pct", "resume_quality_score",
-            "score", "summary", "strengths", "weaknesses", "cover_letter_report",
-            "portfolio_url", "github_url", "linkedin_url", "technical_skills", "soft_skills", "certifications"
+            "cover_letter_report", "portfolio_url", "github_url", "linkedin_url",
+            "technical_skills", "soft_skills", "certifications"
         ]:
             gpt_data.setdefault(key, "" if isinstance(gpt_data.get(key), str) else 0)
 
+        # Final merge
         gpt_data.update({
             "experience_years": experience_years,
             "education_level": education_level,
             "skills_matched_pct": skill_match_pct,
             "certifications": format_list(certifications_list),
-            "cover_letter_report": cover_letter_report,
+            "cover_letter_analysis": cover_letter_analysis_dict,
+            "ai_writing_score": ai_score,
             "technical_skills": skills_list,
             "soft_skills": soft_skills_inferred,
             "resume_quality_score": quality_score,
@@ -392,6 +409,7 @@ Calculate the final score as a weighted average of the above.
 
 
 
+
 def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id, resume_source="form"):
     db_url = os.getenv("DATABASE_URL")
     up.uses_netloc.append("postgres")
@@ -407,17 +425,39 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     cur.execute("SELECT id FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
     job_row = cur.fetchone()
     if not job_row:
-        cur.execute("INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
-                    (job_title, "Placeholder description", client_id))
+        cur.execute(
+            "INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
+            (job_title, "Placeholder description", client_id)
+        )
         job_id = cur.fetchone()[0]
     else:
         job_id = job_row[0]
 
-    cur.execute("""
-    INSERT INTO resumes (job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
+    
+    args = (
+    job_id, name, email, phone, resume_url,
+    gpt_result["score"], gpt_result["summary"], gpt_result["strengths"], gpt_result["weaknesses"],
+    gpt_result["experience_years"], gpt_result["education_level"], gpt_result["skills_matched_pct"],
+    gpt_result["certifications"], resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
+    gpt_result["linkedin_url"], gpt_result["technical_skills"], gpt_result["soft_skills"],
+    gpt_result["resume_quality_score"], json.dumps(gpt_result["cover_letter_analysis"]),
+    gpt_result["ai_writing_score"], datetime.utcnow()
+)
+
+    print("ARGS COUNT:", len(args))
+    for i, arg in enumerate(args):
+     print(f"{i + 1}. {type(arg)} to {repr(arg)}")
+    
+     cur.execute("""
+    INSERT INTO resumes (
+        job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
         experience_years, education_level, skills_matched_pct, certifications, resume_source,
-        portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score, cover_letter_report)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score,
+        cover_letter_analysis, ai_writing_score, application_date
+    )
+    VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    )
     ON CONFLICT (email, job_id) DO UPDATE
     SET phone = EXCLUDED.phone,
         score = EXCLUDED.score,
@@ -435,19 +475,38 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         technical_skills = EXCLUDED.technical_skills,
         soft_skills = EXCLUDED.soft_skills,
         resume_quality_score = EXCLUDED.resume_quality_score,
-        cover_letter_report = EXCLUDED.cover_letter_report;
-    """, (
-        job_id, name, email, phone, resume_url, gpt_result["score"], gpt_result["summary"],
-        gpt_result["strengths"], gpt_result["weaknesses"], gpt_result["experience_years"],
-        gpt_result["education_level"], gpt_result["skills_matched_pct"], gpt_result["certifications"],
-        resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
-        gpt_result["linkedin_url"], gpt_result["technical_skills"], gpt_result["soft_skills"],
-        gpt_result["resume_quality_score"], gpt_result["cover_letter_report"]
-    ))
-
+        cover_letter_analysis = EXCLUDED.cover_letter_analysis,
+        ai_writing_score = EXCLUDED.ai_writing_score,
+        application_date = EXCLUDED.application_date;
+""", (
+    job_id,
+    name,
+    email,
+    phone,
+    resume_url,
+    gpt_result["score"],
+    gpt_result["summary"],
+    gpt_result["strengths"],
+    gpt_result["weaknesses"],
+    gpt_result["experience_years"],
+    gpt_result["education_level"],
+    gpt_result["skills_matched_pct"],
+    gpt_result["certifications"],
+    resume_source,
+    gpt_result["portfolio_url"],
+    gpt_result["github_url"],
+    gpt_result["linkedin_url"],
+    gpt_result["technical_skills"],
+    gpt_result["soft_skills"],
+    gpt_result["resume_quality_score"],
+    json.dumps(gpt_result["cover_letter_analysis"]),
+    gpt_result["ai_writing_score"],
+    datetime.utcnow()
+))
     conn.commit()
     cur.close()
     conn.close()
+
 
 
 def get_job_description_from_db(job_title):

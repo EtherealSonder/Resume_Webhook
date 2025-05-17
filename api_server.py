@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from Resume_Parser import process_resume_file
@@ -135,7 +137,7 @@ def get_candidates():
         cur.execute("""
             SELECT r.candidate_name, r.email, r.phone, r.score, r.experience_years, j.job_title,
                    r.education_level, r.skills_matched_pct, r.certifications,
-                   r.cover_letter_report, r.application_date,
+                   r.cover_letter_analysis, r.ai_writing_score, r.application_date,
                    r.technical_skills, r.soft_skills,
                    r.portfolio_url, r.github_url, r.linkedin_url,
                    r.summary, r.strengths, r.weaknesses,
@@ -160,17 +162,22 @@ def get_candidates():
                 "education": row[6],
                 "skill_match": row[7],
                 "certifications": row[8],
-                "cover_letter_report": row[9] if row[9] else "Not Provided",
-                "submitted_at": row[10],
-                "technical_skills": row[11] or "",
-                "soft_skills": row[12] or "",
-                "portfolio_url": row[13],
-                "github_url": row[14],
-                "linkedin_url": row[15],
-                "summary": row[16] or "",
-                "strengths": row[17] or "",
-                "weaknesses": row[18] or "",
-                "resume_url": row[19] or ""
+                "cover_letter_analysis": row[9] if row[9] else {
+    "analysis": "No cover letter provided.",
+    "issues": [],
+    "recommendation": "Cover letter missing - request one from candidate",
+},
+"ai_writing_score": row[10] if row[10] is not None else 0,
+                "submitted_at": row[11],
+                "technical_skills": row[12] or "",
+                "soft_skills": row[13] or "",
+                "portfolio_url": row[14],
+                "github_url": row[15],
+                "linkedin_url": row[16],
+                "summary": row[17] or "",
+                "strengths": row[18] or "",
+                "weaknesses": row[19] or "",
+                "resume_url": row[20] or ""
             }
             for row in rows
         ]
@@ -266,18 +273,18 @@ def statistics():
         # Cover letter authenticity pie based on report presence
         cur.execute("""
             SELECT
-              CASE
-                WHEN r.cover_letter_report IS NULL OR TRIM(r.cover_letter_report) = ''
-                  THEN 'No Cover Letter'
-                WHEN POSITION('AI' IN r.cover_letter_report) > 0 OR POSITION('fabricated' IN r.cover_letter_report) > 0
-                  THEN 'Suspicious / Likely AI'
+                CASE
+                     WHEN r.cover_letter_analysis IS NULL THEN 'No Cover Letter'
+                     WHEN r.ai_writing_score > 50 THEN 'Suspicious / Likely AI'
+                     WHEN r.ai_writing_score BETWEEN 31 AND 50 THEN 'Possibly AI-Assisted'
                 ELSE 'Authentic / Real'
-              END AS label,
-              COUNT(*)
+                END AS label,
+                COUNT(*)
             FROM resumes r
-            JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s
-            GROUP BY label;
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s
+                GROUP BY label;
+
         """, (client_id,))
         cover_pie = [{"label": row[0], "value": row[1]} for row in cur.fetchall()]
 
@@ -306,14 +313,20 @@ def get_jobs():
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("SELECT id, job_title, job_description FROM jobs WHERE client_id = %s", (client_id,))
+        cur.execute("SELECT id, job_title, job_description, created_at FROM jobs WHERE client_id = %s", (client_id,))
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
         return jsonify([
-            {"id": r[0], "title": r[1], "description": r[2]} for r in rows
-        ])
+    {
+        "id": r[0],
+        "title": r[1],
+        "description": r[2],
+        "created_at": r[3]
+    }
+    for r in rows
+])
 
     except Exception as e:
         logging.exception("Error in /jobs")
@@ -337,6 +350,42 @@ def get_job_by_id(job_id):
     else:
         return {"error": "Job not found"}, 404
 
+
+@app.route("/resumes", methods=["GET"])
+def get_resumes_by_client_id():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, job_id, candidate_name, email, score
+            FROM resumes
+            WHERE job_id IN (
+                SELECT id FROM jobs WHERE client_id = %s
+            );
+        """, (client_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        resumes = [
+            {
+                "id": row[0],
+                "job_id": row[1],
+                "candidate_name": row[2],
+                "email": row[3],
+                "score": row[4]
+            }
+            for row in rows
+        ]
+        return jsonify(resumes)
+
+    except Exception as e:
+        print("Error in /resumes route:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/jobs/create", methods=["POST"])
 def create_job():
