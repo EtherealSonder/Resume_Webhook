@@ -20,15 +20,29 @@ def upload_to_s3(file_path: str, job_id: str, original_name: str) -> str:
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"resume_{job_id}_{timestamp}_{original_name}".replace(" ", "_")
+
+        # Upload the file
         s3.upload_file(
             Filename=file_path,
             Bucket=AWS_BUCKET,
             Key=filename,
             ExtraArgs={"ContentType": "application/pdf"}
-         )
-        url = f"https://{AWS_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{filename}"
-        return url
+        )
+
+        # Generate a pre-signed URL valid for 1 hour (3600 seconds)
+        presigned_url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": AWS_BUCKET,
+                "Key": filename
+            },
+            ExpiresIn=3600  # 1 hour
+        )
+        print("Uploading to S3 key:", filename)
+
+        return presigned_url
     except NoCredentialsError:
         raise Exception("AWS credentials not found.")
     except Exception as e:
         raise e
+

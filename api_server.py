@@ -133,8 +133,13 @@ def get_candidates():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
         cur.execute("""
-            SELECT r.candidate_name, r.email, r.score, r.experience_years, j.job_title,
-                   r.education_level, r.skills_matched_pct, r.certifications, r.cover_letter_report
+            SELECT r.candidate_name, r.email, r.phone, r.score, r.experience_years, j.job_title,
+                   r.education_level, r.skills_matched_pct, r.certifications,
+                   r.cover_letter_report, r.application_date,
+                   r.technical_skills, r.soft_skills,
+                   r.portfolio_url, r.github_url, r.linkedin_url,
+                   r.summary, r.strengths, r.weaknesses,
+                   r.resume_url
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -148,13 +153,24 @@ def get_candidates():
             {
                 "name": row[0],
                 "email": row[1],
-                "score": row[2],
-                "experience": row[3],
-                "job_title": row[4],
-                "education": row[5],
-                "skill_match": row[6],
-                "certifications": row[7],
-                "cover_letter_report": row[8] if row[8] else "Not Provided"
+                "phone": row[2],
+                "score": row[3],
+                "experience": row[4],
+                "job_title": row[5],
+                "education": row[6],
+                "skill_match": row[7],
+                "certifications": row[8],
+                "cover_letter_report": row[9] if row[9] else "Not Provided",
+                "submitted_at": row[10],
+                "technical_skills": row[11] or "",
+                "soft_skills": row[12] or "",
+                "portfolio_url": row[13],
+                "github_url": row[14],
+                "linkedin_url": row[15],
+                "summary": row[16] or "",
+                "strengths": row[17] or "",
+                "weaknesses": row[18] or "",
+                "resume_url": row[19] or ""
             }
             for row in rows
         ]
@@ -163,7 +179,6 @@ def get_candidates():
     except Exception as e:
         logging.exception("Error fetching candidates")
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
