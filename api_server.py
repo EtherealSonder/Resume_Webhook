@@ -11,7 +11,7 @@ import psycopg2
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
-
+import threading
 load_dotenv()
 
 app = Flask(__name__)
@@ -54,10 +54,15 @@ def parse_resume():
     job_id = request.form.get("job_id")
     cover_letter = request.form.get("cover_letter", "")
 
+    if not resume_file:
+        return jsonify({"error": "Missing resume"}), 400
+
+    # Save resume to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
         resume_file.save(temp.name)
         file_path = temp.name
 
+    # Lookup job title and client ID
     conn = psycopg2.connect(os.getenv("DATABASE_URL"))
     cur = conn.cursor()
     cur.execute("SELECT job_title, client_id FROM jobs WHERE id = %s", (job_id,))
@@ -70,14 +75,58 @@ def parse_resume():
 
     job_title, client_id = row
 
-    try:
-        s3_url = upload_to_s3(file_path, job_id, resume_file.filename)
-    except Exception as e:
-        return jsonify({"error": f"S3 upload failed: {str(e)}"}), 500
+    def background_task():
+        try:
+            from s3_utils import upload_to_s3
+            s3_url = upload_to_s3(file_path, job_id, resume_file.filename)
+            process_resume_file(file_path, job_title, cover_letter, client_id, resume_source="form", resume_url=s3_url)
 
-    result = process_resume_file(file_path, job_title, cover_letter, client_id, resume_source="form", resume_url=s3_url)
-    os.unlink(file_path)
-    return jsonify(result)
+            # Signal for frontend
+            with open("new_resume_notification.flag", "w") as flag_file:
+                flag_file.write("1")
+        finally:
+            os.unlink(file_path)
+
+    threading.Thread(target=background_task).start()
+    return jsonify({"message": "Application received. Processing in background."})
+
+
+@app.route("/notification_status", methods=["GET"])
+def notification_status():
+    try:
+        if os.path.exists("new_resume_notification.flag"):
+            conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT candidate_name, application_date
+                FROM resumes
+                ORDER BY application_date DESC
+                LIMIT 1;
+            """)
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                "new_resume": True,
+                "latest_resume": {
+                    "candidate_name": row[0],
+                    "application_date": row[1].isoformat()
+                }
+            })
+        else:
+            return jsonify({"new_resume": False})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    
+@app.route("/clear_notification", methods=["POST"])
+def clear_notification():
+    try:
+        if os.path.exists("new_resume_notification.flag"):
+            os.remove("new_resume_notification.flag")
+        return jsonify({"cleared": True})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/signup", methods=["POST"])
 def signup():
