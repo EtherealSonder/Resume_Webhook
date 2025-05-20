@@ -278,7 +278,7 @@ def get_statistics():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
 
-        # Get score vs experience data WITH candidate names
+        # 1. Score vs Experience Plot
         cur.execute("""
             SELECT r.candidate_name, r.score, r.experience_years, j.job_title
             FROM resumes r
@@ -286,28 +286,85 @@ def get_statistics():
             WHERE j.client_id = %s;
         """, (client_id,))
         rows = cur.fetchall()
+        score_experience_data = [
+            {
+                "candidate_name": r[0] or "Unnamed",
+                "score": float(r[1]),
+                "experience": float(r[2]),
+                "job_title": r[3]
+            }
+            for r in rows if r[1] is not None and r[2] is not None
+        ]
 
-        score_experience_data = []
-        for row in rows:
-            name, score, exp, job_title = row
-            if score is not None and exp is not None:
-                score_experience_data.append({
-                    "candidate_name": name or "Unnamed",
-                    "score": float(score),
-                    "experience": float(exp),
-                    "job_title": job_title
-                })
+        # 2. Most Applied Jobs using CTE
+        cur.execute("""
+            WITH ranked_resumes AS (
+                SELECT
+                    j.job_title,
+                    j.created_at,
+                    r.candidate_name,
+                    r.score,
+                    ROW_NUMBER() OVER (PARTITION BY j.job_title ORDER BY r.score DESC) as rank
+                FROM resumes r
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s
+            )
+            SELECT
+                rr.job_title,
+                COUNT(*) as application_count,
+                ROUND(AVG(rr.score)::numeric, 1) as avg_score,
+                MAX(rr.created_at) as created_at,
+                MAX(rr.candidate_name) FILTER (WHERE rr.rank = 1) as top_candidate_name,
+                MAX(rr.score) FILTER (WHERE rr.rank = 1) as top_candidate_score
+            FROM ranked_resumes rr
+            GROUP BY rr.job_title
+            ORDER BY application_count DESC;
+        """, (client_id,))
+        most_applied_jobs_rows = cur.fetchall()
+        most_applied_jobs = [
+            {
+                "job_title": r[0],
+                "application_count": r[1],
+                "avg_score": float(r[2]) if r[2] is not None else 0,
+                "created_at": r[3] if isinstance(r[3], str) else r[3].isoformat() if r[3] else None,
+                "top_candidate_name": r[4] or "None",
+                "top_candidate_score": float(r[5]) if r[5] is not None else 0
+            }
+            for r in most_applied_jobs_rows
+        ]
+
+        # 3. Applications Timeline — now includes job_title
+        cur.execute("""
+            SELECT DATE(r.application_date), j.job_title, COUNT(*) as count
+            FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
+            GROUP BY DATE(r.application_date), j.job_title
+            ORDER BY DATE(r.application_date) ASC;
+        """, (client_id,))
+        timeline_rows = cur.fetchall()
+        application_timeline = [
+            {
+                "date": r[0] if isinstance(r[0], str) else r[0].isoformat(),
+                "job_title": r[1],
+                "count": r[2]
+            }
+            for r in timeline_rows
+        ]
 
         cur.close()
         conn.close()
 
         return jsonify({
-            "scoreExperiencePlot": score_experience_data
+            "scoreExperiencePlot": score_experience_data,
+            "mostAppliedJobs": most_applied_jobs,
+            "applicationTimeline": application_timeline
         })
 
     except Exception as e:
         print("Error in /statistics:", e)
         return jsonify({"error": str(e)}), 500
+
 
 
 
