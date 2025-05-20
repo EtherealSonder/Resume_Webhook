@@ -190,7 +190,7 @@ def get_candidates():
                    r.technical_skills, r.soft_skills,
                    r.portfolio_url, r.github_url, r.linkedin_url,
                    r.summary, r.strengths, r.weaknesses,
-                   r.resume_url
+                   r.resume_url, r.resume_quality_score
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -226,7 +226,9 @@ def get_candidates():
                 "summary": row[17] or "",
                 "strengths": row[18] or "",
                 "weaknesses": row[19] or "",
-                "resume_url": row[20] or ""
+                "resume_url": row[20] or "",
+                "resume_quality_score": row[21] or 0
+                
             }
             for row in rows
         ]
@@ -267,7 +269,7 @@ def dashboard():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/statistics", methods=["GET"])
-def statistics():
+def get_statistics():
     client_id = request.args.get("client_id")
     if not client_id:
         return jsonify({"error": "Missing client_id"}), 400
@@ -276,81 +278,37 @@ def statistics():
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
 
-        # Job volume chart
+        # Get score vs experience data WITH candidate names
         cur.execute("""
-            SELECT j.job_title, COUNT(*) FROM resumes r
-            JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s
-            GROUP BY j.job_title;
-        """, (client_id,))
-        job_dist = [{"title": row[0] or "Unknown", "count": row[1]} for row in cur.fetchall()]
-
-        # Education breakdown
-        cur.execute("""
-            SELECT r.education_level, COUNT(*) FROM resumes r
-            JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s
-            GROUP BY r.education_level;
-        """, (client_id,))
-        edu_pie = [{"level": row[0] or "Unknown", "count": row[1]} for row in cur.fetchall()]
-
-        # Application timeline
-        cur.execute("""
-            SELECT DATE(r.application_date), COUNT(*) FROM resumes r
-            JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s
-            GROUP BY DATE(r.application_date)
-            ORDER BY DATE(r.application_date);
-        """, (client_id,))
-        timeline = [{"date": str(row[0]), "count": row[1]} for row in cur.fetchall()]
-
-        # Score vs Experience (scatter)
-        cur.execute("""
-            SELECT r.experience_years, r.score, j.job_title FROM resumes r
+            SELECT r.candidate_name, r.score, r.experience_years, j.job_title
+            FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s;
         """, (client_id,))
-        score_exp = [
-            {
-                "experience": float(row[0]) if row[0] is not None else 0.0,
-                "score": float(row[1]) if row[1] is not None else 0.0,
-                "job_title": row[2]
-            }
-            for row in cur.fetchall()
-        ]
+        rows = cur.fetchall()
 
-        # Cover letter authenticity pie based on report presence
-        cur.execute("""
-            SELECT
-                CASE
-                     WHEN r.cover_letter_analysis IS NULL THEN 'No Cover Letter'
-                     WHEN r.ai_writing_score > 50 THEN 'Suspicious / Likely AI'
-                     WHEN r.ai_writing_score BETWEEN 31 AND 50 THEN 'Possibly AI-Assisted'
-                ELSE 'Authentic / Real'
-                END AS label,
-                COUNT(*)
-            FROM resumes r
-                JOIN jobs j ON r.job_id = j.id
-                WHERE j.client_id = %s
-                GROUP BY label;
-
-        """, (client_id,))
-        cover_pie = [{"label": row[0], "value": row[1]} for row in cur.fetchall()]
+        score_experience_data = []
+        for row in rows:
+            name, score, exp, job_title = row
+            if score is not None and exp is not None:
+                score_experience_data.append({
+                    "candidate_name": name or "Unnamed",
+                    "score": float(score),
+                    "experience": float(exp),
+                    "job_title": job_title
+                })
 
         cur.close()
         conn.close()
 
         return jsonify({
-            "jobDistribution": job_dist,
-            "educationPie": edu_pie,
-            "applicationTrends": timeline,
-            "scoreExperiencePlot": score_exp,
-            "authenticityPie": cover_pie
+            "scoreExperiencePlot": score_experience_data
         })
 
     except Exception as e:
-        logging.exception("Error in /statistics")
+        print("Error in /statistics:", e)
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/jobs", methods=["GET"])
@@ -503,6 +461,66 @@ def delete_job(job_id):
         return jsonify({"message": "Job deleted successfully"})
     except Exception as e:
         logging.exception("Error in DELETE /jobs")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/analytics/rubric_breakdown", methods=["GET"])
+def rubric_breakdown():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        # Fetch necessary data
+        cur.execute("""
+            SELECT
+                resume_quality_score,
+                skills_matched_pct,
+                experience_years,
+                education_level,
+                certifications,
+                soft_skills
+            FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s;
+        """, (client_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return jsonify({})
+
+        total = len(rows)
+        sum_resume_quality = sum(r[0] or 0 for r in rows)
+        sum_skill_match = sum(r[1] or 0 for r in rows)
+        sum_experience = sum(r[2] or 0 for r in rows)
+
+        # Education to score
+        edu_map = {"PhD": 100, "Master's": 80, "Bachelor's": 60, "Diploma": 40, "High School": 20, "Other": 10}
+        edu_scores = [edu_map.get((r[3] or "").strip(), 0) for r in rows]
+        sum_edu_score = sum(edu_scores)
+
+        # Certifications = binary score
+        cert_score = sum(10 if (r[4] and r[4].strip()) else 0 for r in rows)
+
+        # Soft skills = count
+        soft_skill_score = sum(len(r[5] or []) for r in rows)
+
+        return jsonify({
+            "avg_resume_quality": round(sum_resume_quality / total, 2),
+            "avg_skill_match": round(sum_skill_match / total, 2),
+            "avg_experience": round(sum_experience / total, 2),
+            "avg_education_level_score": round(sum_edu_score / total, 2),
+            "avg_certification_score": round(cert_score / total, 2),
+            "avg_soft_skills_score": round(soft_skill_score / total, 2)
+        })
+
+    except Exception as e:
+        print("Error in rubric_breakdown:", e)
         return jsonify({"error": str(e)}), 500
 
 
