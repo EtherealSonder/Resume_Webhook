@@ -365,7 +365,84 @@ def get_statistics():
         print("Error in /statistics:", e)
         return jsonify({"error": str(e)}), 500
 
+@app.route("/statistics/distributions", methods=["GET"])
+def get_distributions():
+    client_id = request.args.get("client_id")
+    job_titles = request.args.getlist("job_titles[]")
+    
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
 
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        # Build filter condition
+        if job_titles:
+            cur.execute("""
+                SELECT r.score, r.experience_years, r.education_level
+                FROM resumes r
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s AND j.job_title = ANY(%s)
+            """, (client_id, job_titles))
+        else:
+            cur.execute("""
+                SELECT r.score, r.experience_years, r.education_level
+                FROM resumes r
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s
+            """, (client_id,))
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        scoreBuckets = {f"{i}-{i+9}": 0 for i in range(0, 100, 10)}
+        scoreBuckets["100"] = 0
+
+        experienceHistogram = {
+                    "0": 0, "0 - 1": 0, "1 - 2": 0, "2 - 4": 0,
+                    "4 - 7": 0, "7 - 10": 0, "10 - 15": 0, "15+": 0
+        }
+        educationLevels = {}
+
+        for score, exp, edu in rows:
+            if score is not None:
+                if score == 100:
+                    scoreBuckets["100"] += 1
+                else:
+                    bucket = f"{int(score // 10) * 10}-{int(score // 10) * 10 + 9}"
+                    scoreBuckets[bucket] += 1
+
+            if exp is not None:
+                if exp == 0:
+                    experienceHistogram["0"] += 1
+                elif exp <= 1:
+                    experienceHistogram["0 - 1"] += 1
+                elif exp <= 2:
+                    experienceHistogram["1 - 2"] += 1
+                elif exp <= 4:
+                    experienceHistogram["2 - 4"] += 1
+                elif exp <= 7:
+                    experienceHistogram["4 - 7"] += 1
+                elif exp <= 10:
+                    experienceHistogram["7 - 10"] += 1
+                elif exp <= 15:
+                    experienceHistogram["10 - 15"] += 1
+                else:
+                    experienceHistogram["15+"] += 1
+
+            edu_clean = (edu or "Other").strip()
+            educationLevels[edu_clean] = educationLevels.get(edu_clean, 0) + 1
+
+        return jsonify({
+            "scoreBuckets": [{"range": k, "count": v} for k, v in scoreBuckets.items()],
+            "experienceHistogram": [{"range": k, "count": v} for k, v in experienceHistogram.items()],
+            "educationLevels": [{"label": k, "value": v} for k, v in educationLevels.items()]
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/jobs", methods=["GET"])
