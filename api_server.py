@@ -445,6 +445,146 @@ def get_distributions():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/statistics/skills", methods=["GET"])
+def get_skill_insights():
+    client_id = request.args.get("client_id")
+    job_titles = request.args.getlist("job_titles[]")
+
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        if job_titles:
+            cur.execute("""
+                SELECT r.technical_skills, r.soft_skills
+                FROM resumes r
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s AND j.job_title = ANY(%s);
+            """, (client_id, job_titles))
+        else:
+            cur.execute("""
+                SELECT r.technical_skills, r.soft_skills
+                FROM resumes r
+                JOIN jobs j ON r.job_id = j.id
+                WHERE j.client_id = %s;
+            """, (client_id,))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        from collections import Counter
+
+        tech_counter = Counter()
+        soft_counter = Counter()
+
+        for tech, soft in rows:
+            tech_skills = tech if isinstance(tech, list) else []
+            soft_skills = soft if isinstance(soft, list) else []
+
+            tech_counter.update([s.strip() for s in tech_skills if s and isinstance(s, str)])
+            soft_counter.update([s.strip() for s in soft_skills if s and isinstance(s, str)])
+
+        top_tech = [{"skill": k, "count": v} for k, v in tech_counter.most_common(20)]
+        top_soft = [{"skill": k, "count": v} for k, v in soft_counter.most_common(20)]
+
+        return jsonify({
+            "technical": top_tech,
+            "soft": top_soft
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/statistics/skills/bubble", methods=["GET"])
+def skill_bubble_data():
+    client_id = request.args.get("client_id")
+    skill_type = request.args.get("type", "technical")
+
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        cur.execute(f"""
+            SELECT j.job_title, r.{skill_type}_skills
+            FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s;
+        """, (client_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        from collections import defaultdict
+        skill_by_job = defaultdict(lambda: defaultdict(int))
+
+        for job_title, skills in rows:
+            if not isinstance(skills, list):
+                continue
+            for s in skills:
+                if isinstance(s, str) and s.strip():
+                    skill_by_job[job_title][s.strip()] += 1
+
+        result = []
+        for job_title, skills in skill_by_job.items():
+            for skill, count in skills.items():
+                result.append({"job_title": job_title, "skill": skill, "count": count})
+
+        return jsonify(result)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/statistics/skills/grid", methods=["GET"])
+def skill_grid_data():
+    client_id = request.args.get("client_id")
+    skill_type = request.args.get("type", "technical")
+
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT j.job_title, r.{skill_type}_skills
+        FROM resumes r
+        JOIN jobs j ON r.job_id = j.id
+        WHERE j.client_id = %s;
+    """, (client_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    from collections import defaultdict
+    grid = defaultdict(lambda: defaultdict(int))
+
+    for job, skills in rows:
+        if not isinstance(skills, list): continue
+        for s in skills:
+            if isinstance(s, str) and s.strip():
+                grid[job][s.strip()] += 1
+
+    # Format: [{ job_title: ..., skill: ..., count: ... }]
+    result = []
+    for job in grid:
+        for skill in grid[job]:
+            result.append({"job_title": job, "skill": skill, "count": grid[job][skill]})
+
+    return jsonify(result)
+
+
+
 @app.route("/jobs", methods=["GET"])
 def get_jobs():
     client_id = request.args.get("client_id")
@@ -656,6 +796,98 @@ def rubric_breakdown():
     except Exception as e:
         print("Error in rubric_breakdown:", e)
         return jsonify({"error": str(e)}), 500
+
+@app.route("/statistics/skills/grouped_bar", methods=["GET"])
+def skill_grouped_bar():
+    client_id = request.args.get("client_id")
+    skill_type = request.args.get("type", "technical")
+
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT j.job_title, r.{skill_type}_skills
+        FROM resumes r
+        JOIN jobs j ON r.job_id = j.id
+        WHERE j.client_id = %s;
+    """, (client_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    from collections import defaultdict
+    skill_data = defaultdict(lambda: defaultdict(int))
+
+    for job, skills in rows:
+        if not isinstance(skills, list): continue
+        for s in skills:
+            if isinstance(s, str) and s.strip():
+                skill_data[s.strip()][job] += 1
+
+    result = []
+    for skill, jobs in skill_data.items():
+        item = {"skill": skill}
+        item.update(jobs)
+        result.append(item)
+
+    return jsonify(result)
+
+
+@app.route("/statistics/skills/radar", methods=["GET"])
+def skill_radar_data():
+    client_id = request.args.get("client_id")
+    job_titles = request.args.getlist("job_titles[]")
+    skill_type = request.args.get("type", "technical")
+
+    if not client_id or len(job_titles) != 2:
+        return jsonify({"error": "Provide client_id and exactly 2 job_titles[]"}), 400
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT j.job_title, r.{skill_type}_skills
+        FROM resumes r
+        JOIN jobs j ON r.job_id = j.id
+        WHERE j.client_id = %s AND j.job_title = ANY(%s);
+    """, (client_id, job_titles))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    from collections import defaultdict
+
+    counter = defaultdict(lambda: defaultdict(int))
+    for job, skills in rows:
+        if not isinstance(skills, list): continue
+        for s in skills:
+            if isinstance(s, str) and s.strip():
+                counter[job][s.strip()] += 1
+
+    # Keep only common skills
+    common_skills = set(counter[job_titles[0]].keys()) & set(counter[job_titles[1]].keys())
+
+    # Build list of dicts with counts
+    result = [
+        {
+            "skill": skill,
+            job_titles[0]: counter[job_titles[0]][skill],
+            job_titles[1]: counter[job_titles[1]][skill],
+        }
+        for skill in common_skills
+    ]
+
+    # Sort by total frequency and limit to top 15
+    result = sorted(
+        result,
+        key=lambda x: x[job_titles[0]] + x[job_titles[1]],
+        reverse=True
+    )[:15]
+
+    return jsonify(result)
+
+
 
 
 if __name__ == "__main__":

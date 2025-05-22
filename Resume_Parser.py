@@ -293,31 +293,115 @@ def format_list(items: List[Any]) -> str:
             continue
     return ', '.join(safe_items)
 
+
+def detect_technical_skills_from_text(text: str) -> List[str]:
+    known_technical_skills = [
+        # Programming Languages
+        "Python", "C++", "C#", "C", "Java", "JavaScript", "TypeScript", "SQL", "HTML", "CSS", "Lua",
+        # Engines & Frameworks
+        "Unity", "Unreal Engine", "Godot", "Construct 3", "Phaser", "Node.js", "React", "Angular", "Django", "Flask",
+        # Game Dev / Graphics
+        "OpenGL", "Shader Programming", "Blender", "MagicaVoxel", "ZBrush", "Maya", "3ds Max", "Photoshop",
+        # AI & ML
+        "TensorFlow", "PyTorch", "Keras", "YOLOv5", "Machine Learning", "Reinforcement Learning", "ML-Agents",
+        # Tools & Platforms
+        "Git", "GitHub", "SVN", "Jira", "Notion", "Trello", "Docker", "AWS", "Firebase", "MongoDB", "PostgreSQL", "MySQL",
+        # OS & Scripting
+        "Linux", "Ubuntu", "Shell Scripting", "Bash", "PowerShell", "Windows", "MacOS",
+        # Simulation & Robotics
+        "ROS1", "ROS2", "Gazebo", "MoveIt", "Simulink", "MATLAB", "Autodesk Fusion 360", "AutoCAD",
+        # Other
+        "MS Office", "Excel Macros", "Marmoset Toolbag", "Mixamo", "Perforce", "PBR Workflow", "LOD Creation"
+    ]
+
+    text_lower = text.lower()
+    found = set()
+
+    for skill in known_technical_skills:
+        # Check for token match or partial match in a case-insensitive way
+        pattern = r'\b' + re.escape(skill.lower()) + r'\b'
+        if re.search(pattern, text_lower):
+            found.add(skill)
+
+    return sorted(found)
+
+def extract_technical_skills(text: str) -> List[str]:
+    import unicodedata
+
+    lines = text.splitlines()
+    skills = []
+    capture = False
+
+    for line in lines:
+        line = unicodedata.normalize("NFKC", line.strip())
+
+        # Start capturing if we hit the technical skills header
+        if re.search(r"technical\s+skills", line.lower()):
+            capture = True
+            continue
+
+        # Stop capturing if we hit another section (non-bullet, non-empty)
+        if capture and line and not (line.startswith("-") or line.startswith("*")):
+            break
+
+        # Accept only ASCII-compatible bullets ("-", "*")
+        if capture and (line.startswith("-") or line.startswith("*")):
+            cleaned = re.sub(r"^[-*]\s*", "", line).strip()
+            if cleaned:
+                skills.append(cleaned)
+
+    return skills
+
+
+
 def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_letter: str = "") -> Dict[str, Any]:
-    technical_skills = resume_data.get("technical_skills")
-    soft_skills = resume_data.get("soft_skills")
+    from collections import defaultdict
+
+    technical_skills_field = resume_data.get("technical_skills")
+    soft_skills_field = resume_data.get("soft_skills")
     certifications = resume_data.get("certifications")
     education_raw = resume_data.get("education", "")
     experience_field = resume_data.get("professional_experience", None)
 
-    skills_list = []
-    if technical_skills:
-        skills_list.extend([get_value(skill) for skill in technical_skills.values])
-    if soft_skills:
-        skills_list.extend([get_value(skill) for skill in soft_skills.values])
+    def get_value(x): return x.value if hasattr(x, "value") else x
 
+    # Flatten parsed technical skills (from Mindee)
+    raw_technical_skills = []
+    if technical_skills_field:
+        values = technical_skills_field.values
+        if isinstance(values, list):
+            for skill in values:
+                val = get_value(skill)
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, list):
+                        raw_technical_skills.extend(parsed)
+                    else:
+                        raw_technical_skills.append(val)
+                except:
+                    raw_technical_skills.append(val)
+
+    # Resume full text for scanning
+    resume_text = '\n'.join([f"{k}: {get_value(v)}" for k, v in resume_data.items()])
+    
+    # Extract technical & soft skills from entire text
+    extracted_section_skills = extract_technical_skills(resume_text)
+    extracted_soft_skills = extract_soft_skills(resume_text, cover_letter)
+    inferred_from_body = detect_technical_skills_from_text(resume_text)
+
+    # Combine with fallback
+    final_technical = sorted(set(extracted_section_skills + inferred_from_body + raw_technical_skills))
+    final_soft = sorted(set(extracted_soft_skills))
+
+    # Process other fields
     certifications_list = certifications.values if certifications else []
     experience_entries = experience_field.values if experience_field and hasattr(experience_field, "values") else []
-
     experience_years = calculate_experience_years(experience_entries)
     education_level = extract_education_level(get_value(education_raw))
-    skill_match_pct = compute_skill_match(skills_list, job_description)
-    resume_text = '\n'.join([f"{k}: {get_value(v)}" for k, v in resume_data.items()])
+    skill_match_pct = compute_skill_match(final_technical, job_description)
     quality_score = compute_resume_quality_score(resume_text)
-    soft_skills_inferred = extract_soft_skills(resume_text, cover_letter)
     links = extract_links_from_text(resume_text)
     cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
-    cover_letter_report = cover_letter_analysis_dict.get("analysis", "")
     ai_score = cover_letter_analysis_dict.get("ai_probability", 0)
 
     # GPT evaluation prompt
@@ -331,12 +415,12 @@ Your task is to evaluate a resume and cover letter against a job description, an
 - Weaknesses (if any)
 
 SCORING RUBRIC:
-- Resume Quality (formatting, clarity, layout): {quality_score}/100 (20%)
-- Years of Relevant Experience: {experience_years} (20%)
+- Resume Quality: {quality_score}/100 (20%)
+- Years of Experience: {experience_years} (20%)
 - Skill Match: {skill_match_pct}% (25%)
 - Education Level: {education_level} (15%)
 - Soft Skills: (10%)
-- Certifications or Industry Tools: (10%)
+- Certifications: (10%)
 
 ### Job Description:
 {job_description.strip()}
@@ -344,16 +428,14 @@ SCORING RUBRIC:
 ### Resume:
 {resume_text.strip()}
 """
+
     if cover_letter:
         prompt += f"\n### Cover Letter:\n{cover_letter.strip()}"
 
     response = openai_client.chat.completions.create(
         model="gpt-4",
         messages=[
-            {
-                "role": "system",
-                "content": "You are an expert resume evaluator. Return a valid JSON with keys: score, summary, strengths, weaknesses."
-            },
+            {"role": "system", "content": "Return valid JSON only. No prose or comments."},
             {"role": "user", "content": prompt}
         ]
     )
@@ -361,7 +443,6 @@ SCORING RUBRIC:
     try:
         gpt_data = json.loads(response.choices[0].message.content.strip())
 
-        # Ensure fallback keys
         for key in [
             "score", "summary", "strengths", "weaknesses",
             "experience_years", "education_level", "skills_matched_pct", "resume_quality_score",
@@ -370,7 +451,6 @@ SCORING RUBRIC:
         ]:
             gpt_data.setdefault(key, "" if isinstance(gpt_data.get(key), str) else 0)
 
-        # Final merge
         gpt_data.update({
             "experience_years": experience_years,
             "education_level": education_level,
@@ -378,8 +458,8 @@ SCORING RUBRIC:
             "certifications": format_list(certifications_list),
             "cover_letter_analysis": cover_letter_analysis_dict,
             "ai_writing_score": ai_score,
-            "technical_skills": skills_list,
-            "soft_skills": soft_skills_inferred,
+            "technical_skills": final_technical,
+            "soft_skills": final_soft,
             "resume_quality_score": quality_score,
             **links
         })
@@ -391,10 +471,9 @@ SCORING RUBRIC:
         print("Raw output:", response.choices[0].message.content)
         return {
             "score": 0,
-            "summary": "Error in evaluation.",
+            "summary": "Evaluation error.",
             "strengths": "",
             "weaknesses": "",
-            "cover_letter_report": "N/A",
             "experience_years": 0,
             "education_level": "",
             "skills_matched_pct": 0,
@@ -408,6 +487,17 @@ SCORING RUBRIC:
         }
 
 
+
+def normalize_skill_list(value):
+    if isinstance(value, str):
+        try:
+            # Handle JSON-like strings
+            return json.loads(value)
+        except:
+            return [value]
+    elif isinstance(value, list):
+        return [str(v) for v in value if isinstance(v, str)]
+    return []
 
 
 def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id, resume_source="form"):
@@ -423,89 +513,73 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     phone = safe_val(parsed_data.get("phone_number"))
 
     cur.execute("SELECT id FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
-    job_row = cur.fetchone()
-    if not job_row:
-        cur.execute(
-            "INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
-            (job_title, "Placeholder description", client_id)
-        )
+    row = cur.fetchone()
+    job_id = row[0] if row else None
+    if not job_id:
+        cur.execute("INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
+                    (job_title, "Placeholder description", client_id))
         job_id = cur.fetchone()[0]
-    else:
-        job_id = job_row[0]
 
-    
+    def normalize_skill_list(value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except:
+                return [value]
+        elif isinstance(value, list):
+            return [str(v) for v in value if isinstance(v, str)]
+        return []
+
+    technical_skills_list = normalize_skill_list(gpt_result.get("technical_skills", []))
+    soft_skills_list = normalize_skill_list(gpt_result.get("soft_skills", []))
+
     args = (
-    job_id, name, email, phone, resume_url,
-    gpt_result["score"], gpt_result["summary"], gpt_result["strengths"], gpt_result["weaknesses"],
-    gpt_result["experience_years"], gpt_result["education_level"], gpt_result["skills_matched_pct"],
-    gpt_result["certifications"], resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
-    gpt_result["linkedin_url"], gpt_result["technical_skills"], gpt_result["soft_skills"],
-    gpt_result["resume_quality_score"], json.dumps(gpt_result["cover_letter_analysis"]),
-    gpt_result["ai_writing_score"], datetime.utcnow()
-)
+        job_id, name, email, phone, resume_url,
+        gpt_result["score"], gpt_result["summary"], gpt_result["strengths"], gpt_result["weaknesses"],
+        gpt_result["experience_years"], gpt_result["education_level"], gpt_result["skills_matched_pct"],
+        gpt_result["certifications"], resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
+        gpt_result["linkedin_url"], technical_skills_list, soft_skills_list,
+        gpt_result["resume_quality_score"], json.dumps(gpt_result["cover_letter_analysis"]),
+        gpt_result["ai_writing_score"], datetime.utcnow()
+    )
 
-    print("ARGS COUNT:", len(args))
-    for i, arg in enumerate(args):
-     print(f"{i + 1}. {type(arg)} to {repr(arg)}")
-    
-     cur.execute("""
-    INSERT INTO resumes (
-        job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
-        experience_years, education_level, skills_matched_pct, certifications, resume_source,
-        portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score,
-        cover_letter_analysis, ai_writing_score, application_date
-    )
-    VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-    )
-    ON CONFLICT (email, job_id) DO UPDATE
-    SET phone = EXCLUDED.phone,
-        score = EXCLUDED.score,
-        summary = EXCLUDED.summary,
-        strengths = EXCLUDED.strengths,
-        weaknesses = EXCLUDED.weaknesses,
-        experience_years = EXCLUDED.experience_years,
-        education_level = EXCLUDED.education_level,
-        skills_matched_pct = EXCLUDED.skills_matched_pct,
-        certifications = EXCLUDED.certifications,
-        resume_source = EXCLUDED.resume_source,
-        portfolio_url = EXCLUDED.portfolio_url,
-        github_url = EXCLUDED.github_url,
-        linkedin_url = EXCLUDED.linkedin_url,
-        technical_skills = EXCLUDED.technical_skills,
-        soft_skills = EXCLUDED.soft_skills,
-        resume_quality_score = EXCLUDED.resume_quality_score,
-        cover_letter_analysis = EXCLUDED.cover_letter_analysis,
-        ai_writing_score = EXCLUDED.ai_writing_score,
-        application_date = EXCLUDED.application_date;
-""", (
-    job_id,
-    name,
-    email,
-    phone,
-    resume_url,
-    gpt_result["score"],
-    gpt_result["summary"],
-    gpt_result["strengths"],
-    gpt_result["weaknesses"],
-    gpt_result["experience_years"],
-    gpt_result["education_level"],
-    gpt_result["skills_matched_pct"],
-    gpt_result["certifications"],
-    resume_source,
-    gpt_result["portfolio_url"],
-    gpt_result["github_url"],
-    gpt_result["linkedin_url"],
-    gpt_result["technical_skills"],
-    gpt_result["soft_skills"],
-    gpt_result["resume_quality_score"],
-    json.dumps(gpt_result["cover_letter_analysis"]),
-    gpt_result["ai_writing_score"],
-    datetime.utcnow()
-))
+    cur.execute("""
+        INSERT INTO resumes (
+            job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
+            experience_years, education_level, skills_matched_pct, certifications, resume_source,
+            portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score,
+            cover_letter_analysis, ai_writing_score, application_date
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (email, job_id) DO UPDATE
+        SET phone = EXCLUDED.phone,
+            score = EXCLUDED.score,
+            summary = EXCLUDED.summary,
+            strengths = EXCLUDED.strengths,
+            weaknesses = EXCLUDED.weaknesses,
+            experience_years = EXCLUDED.experience_years,
+            education_level = EXCLUDED.education_level,
+            skills_matched_pct = EXCLUDED.skills_matched_pct,
+            certifications = EXCLUDED.certifications,
+            resume_source = EXCLUDED.resume_source,
+            portfolio_url = EXCLUDED.portfolio_url,
+            github_url = EXCLUDED.github_url,
+            linkedin_url = EXCLUDED.linkedin_url,
+            technical_skills = EXCLUDED.technical_skills,
+            soft_skills = EXCLUDED.soft_skills,
+            resume_quality_score = EXCLUDED.resume_quality_score,
+            cover_letter_analysis = EXCLUDED.cover_letter_analysis,
+            ai_writing_score = EXCLUDED.ai_writing_score,
+            application_date = EXCLUDED.application_date;
+    """, args)
+
     conn.commit()
     cur.close()
     conn.close()
+
+
 
 
 
