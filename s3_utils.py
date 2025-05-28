@@ -29,14 +29,14 @@ def upload_to_s3(file_path: str, job_id: str, original_name: str) -> str:
             ExtraArgs={"ContentType": "application/pdf"}
         )
 
-        # Generate a pre-signed URL valid for 1 hour (3600 seconds)
+        # Generate a pre-signed URL valid for 24 hours (86400 seconds)
         presigned_url = s3.generate_presigned_url(
             ClientMethod="get_object",
             Params={
                 "Bucket": AWS_BUCKET,
                 "Key": filename
             },
-            ExpiresIn=3600  # 1 hour
+            ExpiresIn=86400  # 24 hours
         )
         print("Uploading to S3 key:", filename)
 
@@ -45,4 +45,3 @@ def upload_to_s3(file_path: str, job_id: str, original_name: str) -> str:
         raise Exception("AWS credentials not found.")
     except Exception as e:
         raise e
-

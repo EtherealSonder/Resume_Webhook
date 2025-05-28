@@ -14,6 +14,9 @@ from openai import OpenAI
 from mindee import Client, AsyncPredictResponse, product
 import re
 
+from copyleaks_client import check_ai_content, check_plagiarism
+
+
 
 mindee_api_key = os.getenv("MINDEE_API_KEY")
 mindee_client = mindee.Client(api_key=mindee_api_key)
@@ -156,29 +159,26 @@ def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> di
     if not cover_letter.strip():
         return {
             "analysis": "No cover letter provided.",
-            "issues": [],
-            "recommendation": "Cover letter missing - request one from candidate.",
-            "ai_probability": 0
+            "relevance": 0,
+            "originality": 0,
+            "tone_consistency": 0,
+            "clarity": 0,
+            "engagement": 0,
+            "ai_writing_score": 0,
+            "recommendation": "Cover letter missing - request one from candidate."
         }
 
+    # GPT-4 Prompt to get nuanced metrics
     prompt = f"""
-You are a recruiter AI that detects inconsistencies or fake claims in cover letters.
+You are a recruiter AI evaluating a cover letter for the following criteria (0-100 scale):
 
-Given:
-- Resume (used as source of truth)
-- Cover Letter (provided by candidate)
+- relevance
+- originality
+- tone consistency
+- clarity
+- engagement
 
-Tasks:
-1. Write a short summary of whether the cover letter aligns with the resume.
-2. List any exaggerated, fabricated, or unverifiable claims.
-3. Estimate the likelihood (0 to 100 percent) that the cover letter was AI-generated.
-4. Suggest whether this cover letter seems trustworthy or not.
-
-Return response as structured JSON with keys:
-- analysis
-- issues (list)
-- ai_probability
-- recommendation
+Return a JSON with these numeric fields and a short analysis.
 
 ### Resume:
 {resume_text.strip()}
@@ -192,20 +192,44 @@ Return response as structured JSON with keys:
         response = openai_client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "Return only the valid JSON object. No prose, no comments."},
+                {"role": "system", "content": "Return valid JSON only, no extra comments."},
                 {"role": "user", "content": prompt}
             ]
         )
-        return json.loads(response.choices[0].message.content.strip())
+        gpt_data = json.loads(response.choices[0].message.content.strip())
+
+        # Calculate ai_writing_score (weighted formula based on 5 metrics)
+        ai_writing_score = (
+            gpt_data.get("relevance", 0) * 0.2 +
+            gpt_data.get("originality", 0) * 0.2 +
+            gpt_data.get("tone_consistency", 0) * 0.2 +
+            gpt_data.get("clarity", 0) * 0.2 +
+            gpt_data.get("engagement", 0) * 0.2
+        )
+        ai_writing_score = round(min(max(ai_writing_score, 0), 100), 2)
+
+        return {
+            "analysis": gpt_data.get("analysis", ""),
+            "relevance": gpt_data.get("relevance", 0),
+            "originality": gpt_data.get("originality", 0),
+            "tone_consistency": gpt_data.get("tone_consistency", 0),
+            "clarity": gpt_data.get("clarity", 0),
+            "engagement": gpt_data.get("engagement", 0),
+            "ai_writing_score": ai_writing_score,
+            "recommendation": "Cover letter evaluated successfully."
+        }
     except Exception as e:
         print("Error analyzing cover letter:", e)
         return {
-            "analysis": "Analysis failed due to an error.",
-            "issues": [],
-            "recommendation": "Unable to verify authenticity.",
-            "ai_probability": -1
+            "analysis": "Analysis failed due to error.",
+            "relevance": 0,
+            "originality": 0,
+            "tone_consistency": 0,
+            "clarity": 0,
+            "engagement": 0,
+            "ai_writing_score": 0,
+            "recommendation": "Unable to evaluate authenticity."
         }
-    
 
 def extract_links_from_text(text: str) -> Dict[str, str]:
     links = {"portfolio_url": "", "github_url": "", "linkedin_url": ""}
@@ -242,46 +266,64 @@ def compute_resume_quality_score(text: str) -> int:
     score = 0
     text_lower = text.lower()
 
-    # 1. Word Count (ideal range: 300–1500)
+    #  Word Count (ideal range: 300–1500)
     word_count = len(text.split())
     if 300 <= word_count <= 1500:
-        score += 20
+        word_count_score = 100
     elif 150 < word_count < 300:
-        score += 10  # Too short
+        word_count_score = 60  # Too short
     elif word_count > 1500:
-        score += 5   # Too verbose
+        word_count_score = 40  # Too verbose
+    else:
+        word_count_score = 20  # very poor
 
-    # 2. Section Coverage: Experience, Skills, Education, Projects
+    #  Section Coverage: Experience, Skills, Education
     required_sections = ["experience", "education", "skills"]
     section_hits = sum(1 for sec in required_sections if sec in text_lower)
-    score += section_hits * 7  # 3 sections x 7 = 21 max
+    section_coverage_score = (section_hits / len(required_sections)) * 100
 
-    # 3. Bullet Points Usage
+    # Bullet Points Usage (good for formatting and clarity)
     bullet_count = text.count(".") + text.count("- ")
     if bullet_count >= 8:
-        score += 15
+        bullet_points_score = 100
     elif bullet_count >= 4:
-        score += 8
+        bullet_points_score = 70
+    else:
+        bullet_points_score = 30
 
-    # 4. Contact Info Presence
-    if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}", text):
-        score += 5
-    if re.search(r"(linkedin\\.com|github\\.com|artstation\\.com)", text_lower):
-        score += 5
-    if re.search(r"\\+?\\d{7,}", text):  # phone number
-        score += 5
+    # Contact Info Presence
+    contact_info_score = 0
+    if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text):
+        contact_info_score += 40
+    if re.search(r"(linkedin\.com|github\.com|artstation\.com)", text_lower):
+        contact_info_score += 30
+    if re.search(r"\+?\d{7,}", text):
+        contact_info_score += 30
+    contact_info_score = min(contact_info_score, 100)
 
-    # 5. Link Presence (GitHub, Portfolio, LinkedIn)
-    if any(link in text_lower for link in ["github", "linkedin", "portfolio", "artstation", "behance"]):
-        score += 10
+    #  Link Presence (GitHub, Portfolio, LinkedIn)
+    link_keywords = ["github", "linkedin", "portfolio", "artstation", "behance"]
+    link_score = 100 if any(link in text_lower for link in link_keywords) else 40
 
-    # 6. Visual Formatting Heuristics
+    # Visual Formatting Heuristics (line count, diversity, etc.)
+    formatting_score = 0
     if len(set(text)) > 30 and "." in text and bullet_count > 2:
-        score += 15
+        formatting_score += 60
     if len(text.split("\n")) >= 20:
-        score += 5
+        formatting_score += 40
+    formatting_score = min(formatting_score, 100)
 
-    return min(score, 100)
+    # Weighted combination of all components
+    resume_quality_score = (
+        word_count_score * 0.2 +
+        section_coverage_score * 0.2 +
+        bullet_points_score * 0.15 +
+        contact_info_score * 0.1 +
+        link_score * 0.15 +
+        formatting_score * 0.2
+    )
+
+    return round(min(max(resume_quality_score, 0), 100), 2)
 
 def format_list(items: List[Any]) -> str:
     safe_items = []
@@ -596,8 +638,11 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
     parsed_resume = read_resume(file_path)
     job_description = get_job_description_from_db(job_title)
     gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
+
+    # Save to DB (no Copyleaks metrics)
     save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url, client_id, resume_source)
     return gpt_result
+
 
 if __name__ == "__main__":
     sample_path = r"/path/to/sample_resume.pdf"

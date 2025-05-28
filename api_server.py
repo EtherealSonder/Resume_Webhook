@@ -888,6 +888,140 @@ def skill_radar_data():
     return jsonify(result)
 
 
+@app.route("/analytics/trust_scores", methods=["GET"])
+def get_trust_scores():
+    job_id = request.args.get("job_id")
+    min_score = request.args.get("min_score", 0, type=float)
+    max_score = request.args.get("max_score", 100, type=float)
+    sort_by = request.args.get("sort_by", "trust_score")
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+
+    query = """
+    SELECT
+        r.candidate_name,
+        r.email,
+        r.job_id,
+        j.job_title,
+        r.human_likeness_score,
+        r.plagiarism_pct,
+        r.trust_score,
+        r.resume_url,
+        r.application_date
+    FROM resumes r
+    JOIN jobs j ON r.job_id = j.id
+    WHERE r.trust_score BETWEEN %s AND %s
+    """
+    params = [min_score, max_score]
+
+    if job_id:
+        query += " AND r.job_id = %s"
+        params.append(job_id)
+
+    # Sort results
+    if sort_by in ["trust_score", "human_likeness_score", "plagiarism_pct"]:
+        query += f" ORDER BY r.{sort_by} DESC"
+
+    cur.execute(query, tuple(params))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    # Build response
+    results = []
+    for row in rows:
+        results.append({
+            "candidate_name": row[0],
+            "email": row[1],
+            "job_id": row[2],
+            "job_title": row[3],
+            "human_likeness_score": row[4],
+            "plagiarism_pct": row[5],
+            "trust_score": row[6],
+            "resume_url": row[7],
+            "submitted_on": row[8].strftime("%Y-%m-%d")
+        })
+
+    return jsonify(results)
+
+@app.route("/analytics/cover_letter_quality", methods=["GET"])
+def get_cover_letter_quality():
+    client_id = request.args.get("client_id")
+    job_title = request.args.get("job_title")
+
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+
+    # Determine the top job
+    cur.execute("""
+        SELECT j.job_title, COUNT(*) as cnt
+        FROM resumes r
+        JOIN jobs j ON r.job_id = j.id
+        WHERE j.client_id = %s
+        GROUP BY j.job_title
+        ORDER BY cnt DESC
+        LIMIT 1;
+    """, (client_id,))
+    top_job_row = cur.fetchone()
+    top_job = top_job_row[0] if top_job_row else None
+
+    # Main data query, only with cover letters
+    query = """
+    SELECT
+        r.id,
+        r.candidate_name,
+        r.email,
+        j.job_title,
+        r.ai_writing_score AS cover_letter_score,
+        r.resume_quality_score,
+        r.application_date
+    FROM resumes r
+    JOIN jobs j ON r.job_id = j.id
+    WHERE j.client_id = %s AND r.cover_letter_analysis IS NOT NULL
+    """
+    params = [client_id]
+
+    if job_title:
+        query += " AND j.job_title = %s"
+        params.append(job_title)
+
+    cur.execute(query, tuple(params))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    cover_letter_scores = [float(r[4]) for r in rows if r[4] is not None]
+    avg_cover_letter_score = round(sum(cover_letter_scores) / len(cover_letter_scores), 2) if cover_letter_scores else 0
+
+    bottom_candidates = sorted(
+        [
+            {
+                "id": r[0],
+                "name": r[1],
+                "email": r[2],
+                "job_title": r[3],
+                "cover_letter_score": float(r[4]) if r[4] else 0,
+                "resume_quality_score": float(r[5]) if r[5] else 0,
+                "submitted_at": r[6].isoformat() if r[6] else ""
+            }
+            for r in rows
+        ],
+        key=lambda x: (x["cover_letter_score"] + x["resume_quality_score"])
+    )[:10]
+
+    return jsonify({
+        "average_cover_letter_score": avg_cover_letter_score,
+        "bottom_candidates": bottom_candidates,
+        "top_job": top_job
+    })
+
+
+
+
 
 
 if __name__ == "__main__":
