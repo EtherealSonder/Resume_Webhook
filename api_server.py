@@ -3,10 +3,14 @@
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from Resume_Parser import process_resume_file
+from job_parser import parse_job_description_with_gpt
+
 from s3_utils import upload_to_s3 
 import tempfile
 import os
 import logging
+import json
+
 import psycopg2
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -679,42 +683,102 @@ def get_jobs():
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("SELECT id, job_title, job_description, created_at FROM jobs WHERE client_id = %s", (client_id,))
+        cur.execute("""
+            SELECT id, job_title, job_description, created_at,
+                expected_technical_skills, expected_soft_skills, expected_education_level,
+                expected_experience_range, expected_certifications, expected_responsibilities,
+                expected_portfolio_required, expected_languages, expected_tools,
+                expected_work_environment, expected_availability, expected_salary_range,
+                job_location_country, job_location_city, job_type,
+                experience_level, application_deadline
+            FROM jobs WHERE client_id = %s
+        """, (client_id,))
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        return jsonify([
-    {
-        "id": r[0],
-        "title": r[1],
-        "description": r[2],
-        "created_at": r[3]
-    }
-    for r in rows
-])
-
+        jobs = []
+        for row in rows:
+            jobs.append({
+                "id": row[0],
+                "title": row[1],
+                "description": row[2],
+                "created_at": row[3],
+                "expected_technical_skills": row[4] or [],
+                "expected_soft_skills": row[5] or [],
+                "expected_education_level": row[6],
+                "expected_experience_range": row[7],
+                "expected_certifications": row[8] or [],
+                "expected_responsibilities": row[9],
+                "expected_portfolio_required": row[10],
+                "expected_languages": row[11] or [],
+                "expected_tools": row[12] or [],
+                "expected_work_environment": row[13],
+                "expected_availability": row[14],
+                "expected_salary_range": row[15],
+                "job_location_country": row[16],
+                "job_location_city": row[17],
+                "job_type": row[18],
+                "experience_level": row[19],
+                "application_deadline": row[20].isoformat() if row[20] else None
+            })
+        return jsonify(jobs)
     except Exception as e:
         logging.exception("Error in /jobs")
         return jsonify([])
 
+
 @app.route("/jobs/<int:job_id>", methods=["GET"])
 def get_job_by_id(job_id):
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-    cur = conn.cursor()
-    cur.execute("SELECT id, job_title, job_description FROM jobs WHERE id = %s;", (job_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, job_title, job_description, created_at,
+                expected_technical_skills, expected_soft_skills, expected_education_level,
+                expected_experience_range, expected_certifications, expected_responsibilities,
+                expected_portfolio_required, expected_languages, expected_tools,
+                expected_work_environment, expected_availability, expected_salary_range,
+                job_location_country, job_location_city, job_type,
+                experience_level, application_deadline
+            FROM jobs WHERE id = %s;
+        """, (job_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
 
-    if row:
-        return {
-            "id": row[0],
-            "job_title": row[1],
-            "job_description": row[2]
-        }
-    else:
-        return {"error": "Job not found"}, 404
+        if row:
+            job = {
+                "id": row[0],
+                "title": row[1],
+                "description": row[2],
+                "created_at": row[3],
+                "expected_technical_skills": row[4] or [],
+                "expected_soft_skills": row[5] or [],
+                "expected_education_level": row[6],
+                "expected_experience_range": row[7],
+                "expected_certifications": row[8] or [],
+                "expected_responsibilities": row[9],
+                "expected_portfolio_required": row[10],
+                "expected_languages": row[11] or [],
+                "expected_tools": row[12] or [],
+                "expected_work_environment": row[13],
+                "expected_availability": row[14],
+                "expected_salary_range": row[15],
+                "job_location_country": row[16],
+                "job_location_city": row[17],
+                "job_type": row[18],
+                "experience_level": row[19],
+                "application_deadline": row[20].isoformat() if row[20] else None
+            }
+            return jsonify(job)
+        else:
+            return jsonify({"error": "Job not found"}), 404
+
+    except Exception as e:
+        logging.exception("Error in GET /jobs/<job_id>")
+        return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/resumes", methods=["GET"])
@@ -760,23 +824,71 @@ def create_job():
     description = data.get("description")
     client_id = data.get("client_id")
 
+    # New fields from frontend (optional - fallback to GPT parsing or defaults)
+    job_location_country = data.get("job_location_country", "")
+    job_location_city = data.get("job_location_city", "")
+    job_type = data.get("job_type", "")
+    experience_level = data.get("experience_level", "No expectation on experience")
+    application_deadline = data.get("application_deadline", None)  # format: YYYY-MM-DD
+
+    # First, parse job description with GPT to fill expected fields
+    parsed_data = parse_job_description_with_gpt(description)
+
+    # Use recruiter-provided expected fields if present, otherwise fallback to parsed data
+    expected_technical_skills = data.get("expected_technical_skills", parsed_data["expected_technical_skills"])
+    expected_soft_skills = data.get("expected_soft_skills", parsed_data["expected_soft_skills"])
+    expected_education_level = data.get("expected_education_level", parsed_data["expected_education_level"])
+    expected_experience_range = data.get("expected_experience_range", parsed_data["expected_experience_range"])
+    expected_certifications = data.get("expected_certifications", parsed_data["expected_certifications"])
+    expected_responsibilities = data.get("expected_responsibilities", parsed_data["expected_responsibilities"])
+    expected_portfolio_required = data.get("expected_portfolio_required", parsed_data["expected_portfolio_required"])
+    expected_languages = data.get("expected_languages", parsed_data["expected_languages"])
+    expected_tools = data.get("expected_tools", parsed_data["expected_tools"])
+    expected_work_environment = data.get("expected_work_environment", parsed_data["expected_work_environment"])
+    expected_availability = data.get("expected_availability", parsed_data["expected_availability"])
+    expected_salary_range = data.get("expected_salary_range", parsed_data["expected_salary_range"])
+
     if not all([title, description, client_id]):
-        return jsonify({"error": "Missing fields"}), 400
+        return jsonify({"error": "Missing required fields"}), 400
 
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO jobs (job_title, job_description, client_id)
-            VALUES (%s, %s, %s) RETURNING id;
-        """, (title, description, client_id))
+            INSERT INTO jobs (
+                job_title, job_description, client_id,
+                expected_technical_skills, expected_soft_skills, expected_education_level,
+                expected_experience_range, expected_certifications, expected_responsibilities,
+                expected_portfolio_required, expected_languages, expected_tools,
+                expected_work_environment, expected_availability, expected_salary_range,
+                job_location_country, job_location_city, job_type,
+                experience_level, application_deadline
+            )
+            VALUES (
+                %s, %s, %s,
+                %s::jsonb, %s::jsonb, %s,
+                %s, %s::jsonb, %s,
+                %s, %s::jsonb, %s::jsonb,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s
+            )
+            RETURNING id;
+        """, (
+            title, description, client_id,
+            json.dumps(expected_technical_skills), json.dumps(expected_soft_skills), expected_education_level,
+            expected_experience_range, json.dumps(expected_certifications), expected_responsibilities,
+            expected_portfolio_required, json.dumps(expected_languages), json.dumps(expected_tools),
+            expected_work_environment, expected_availability, expected_salary_range,
+            job_location_country, job_location_city, job_type,
+            experience_level, application_deadline
+        ))
         job_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
         conn.close()
 
         return jsonify({"message": "Job created", "job_id": job_id})
-
     except Exception as e:
         logging.exception("Error in /jobs/create")
         return jsonify({"error": str(e)}), 500
@@ -786,26 +898,72 @@ def update_job(job_id):
     data = request.get_json()
     title = data.get("title")
     description = data.get("description")
+    job_location_country = data.get("job_location_country", "")
+    job_location_city = data.get("job_location_city", "")
+    job_type = data.get("job_type", "")
+    experience_level = data.get("experience_level", "No expectation on experience")
+    application_deadline = data.get("application_deadline", None)
+
+    expected_technical_skills = data.get("expected_technical_skills", [])
+    expected_soft_skills = data.get("expected_soft_skills", [])
+    expected_education_level = data.get("expected_education_level", "No expectation on education level")
+    expected_experience_range = data.get("expected_experience_range", "No expectation on experience")
+    expected_certifications = data.get("expected_certifications", [])
+    expected_responsibilities = data.get("expected_responsibilities", "No specific responsibilities provided")
+    expected_portfolio_required = data.get("expected_portfolio_required", False)
+    expected_languages = data.get("expected_languages", [])
+    expected_tools = data.get("expected_tools", [])
+    expected_work_environment = data.get("expected_work_environment", "No specific work environment provided")
+    expected_availability = data.get("expected_availability", "No specific availability provided")
+    expected_salary_range = data.get("expected_salary_range", "No salary expectation provided")
 
     if not all([title, description]):
-        return jsonify({"error": "Missing fields"}), 400
+        return jsonify({"error": "Missing required fields: title and description"}), 400
 
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
         cur.execute("""
             UPDATE jobs
-            SET job_title = %s, job_description = %s
+            SET job_title = %s,
+                job_description = %s,
+                job_location_country = %s,
+                job_location_city = %s,
+                job_type = %s,
+                experience_level = %s,
+                application_deadline = %s,
+                expected_technical_skills = %s::jsonb,
+                expected_soft_skills = %s::jsonb,
+                expected_education_level = %s,
+                expected_experience_range = %s,
+                expected_certifications = %s::jsonb,
+                expected_responsibilities = %s,
+                expected_portfolio_required = %s,
+                expected_languages = %s::jsonb,
+                expected_tools = %s::jsonb,
+                expected_work_environment = %s,
+                expected_availability = %s,
+                expected_salary_range = %s
             WHERE id = %s
-        """, (title, description, job_id))
+        """, (
+            title, description,
+            job_location_country, job_location_city, job_type,
+            experience_level, application_deadline,
+            json.dumps(expected_technical_skills), json.dumps(expected_soft_skills), expected_education_level,
+            expected_experience_range, json.dumps(expected_certifications), expected_responsibilities,
+            expected_portfolio_required, json.dumps(expected_languages), json.dumps(expected_tools),
+            expected_work_environment, expected_availability, expected_salary_range,
+            job_id
+        ))
         conn.commit()
         cur.close()
         conn.close()
 
         return jsonify({"message": "Job updated successfully"})
     except Exception as e:
-        logging.exception("Error in PATCH /jobs")
+        logging.exception("Error in PATCH /jobs/<job_id>")
         return jsonify({"error": str(e)}), 500
+
     
 @app.route("/jobs/<int:job_id>", methods=["DELETE"])
 def delete_job(job_id):
@@ -817,10 +975,11 @@ def delete_job(job_id):
         cur.close()
         conn.close()
 
-        return jsonify({"message": "Job deleted successfully"})
+        return jsonify({"message": f"Job ID {job_id} deleted successfully"})
     except Exception as e:
-        logging.exception("Error in DELETE /jobs")
+        logging.exception(f"Error deleting job ID {job_id}")
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/analytics/rubric_breakdown", methods=["GET"])
