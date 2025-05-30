@@ -238,35 +238,6 @@ def get_candidates():
         logging.exception("Error fetching candidates")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    client_id = request.args.get("client_id")
-    if not client_id:
-        return jsonify({"error": "Missing client_id"}), 400
-
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*), AVG(score), AVG(experience_years), AVG(skills_matched_pct)
-            FROM resumes r
-            JOIN jobs j ON r.job_id = j.id
-            WHERE j.client_id = %s;
-        """, (client_id,))
-        count, avg_score, avg_exp, avg_skill = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "totalCandidates": count or 0,
-            "averageScore": round(avg_score or 0, 2),
-            "averageExperience": round(avg_exp or 0, 2),
-            "averageSkillMatch": round(avg_skill or 0, 2)
-        })
-
-    except Exception as e:
-        logging.exception("Error in /dashboard")
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/statistics", methods=["GET"])
 def get_statistics():
@@ -364,6 +335,118 @@ def get_statistics():
     except Exception as e:
         print("Error in /statistics:", e)
         return jsonify({"error": str(e)}), 500
+
+
+from datetime import timedelta, datetime
+
+@app.route("/dashboard", methods=["GET"])
+def get_dashboard_metrics():
+    client_id = request.args.get("client_id")
+    if not client_id:
+        return jsonify({"error": "Missing client_id"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        # Build 7-day window
+        today = datetime.today().date()
+        days_of_week = [(today - timedelta(days=i)).strftime("%a") for i in reversed(range(7))]
+        daily_candidates_data = [{"name": day, "value": 0} for day in days_of_week]
+        daily_jobs_data = [{"name": day, "value": 0} for day in days_of_week]
+
+        # Candidates - counts per day for the last 7 days
+        cur.execute("""
+            SELECT DATE(r.application_date), COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s AND r.application_date >= CURRENT_DATE - INTERVAL '6 days'
+            GROUP BY DATE(r.application_date)
+            ORDER BY DATE(r.application_date);
+        """, (client_id,))
+        for row in cur.fetchall():
+            day_name = row[0].strftime("%a")
+            for entry in daily_candidates_data:
+                if entry["name"] == day_name:
+                    entry["value"] = row[1]
+
+        # Candidates this week
+        cur.execute("""
+            SELECT COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s AND DATE_PART('week', r.application_date) = DATE_PART('week', CURRENT_DATE)
+            AND DATE_PART('year', r.application_date) = DATE_PART('year', CURRENT_DATE);
+        """, (client_id,))
+        candidates_this_week = cur.fetchone()[0]
+
+        # Candidates last week
+        cur.execute("""
+            SELECT COUNT(*) FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s AND DATE_PART('week', r.application_date) = DATE_PART('week', CURRENT_DATE) - 1
+            AND DATE_PART('year', r.application_date) = DATE_PART('year', CURRENT_DATE);
+        """, (client_id,))
+        candidates_last_week = cur.fetchone()[0]
+
+        # Jobs - counts per day for the last 7 days
+        cur.execute("""
+            SELECT DATE(created_at), COUNT(*) FROM jobs
+            WHERE client_id = %s AND created_at >= CURRENT_DATE - INTERVAL '6 days'
+            GROUP BY DATE(created_at)
+            ORDER BY DATE(created_at);
+        """, (client_id,))
+        for row in cur.fetchall():
+            day_name = row[0].strftime("%a")
+            for entry in daily_jobs_data:
+                if entry["name"] == day_name:
+                    entry["value"] = row[1]
+
+        # Jobs this week
+        cur.execute("""
+            SELECT COUNT(*) FROM jobs
+            WHERE client_id = %s AND DATE_PART('week', created_at) = DATE_PART('week', CURRENT_DATE)
+            AND DATE_PART('year', created_at) = DATE_PART('year', CURRENT_DATE);
+        """, (client_id,))
+        jobs_this_week = cur.fetchone()[0]
+
+        # Jobs last week
+        cur.execute("""
+            SELECT COUNT(*) FROM jobs
+            WHERE client_id = %s AND DATE_PART('week', created_at) = DATE_PART('week', CURRENT_DATE) - 1
+            AND DATE_PART('year', created_at) = DATE_PART('year', CURRENT_DATE);
+        """, (client_id,))
+        jobs_last_week = cur.fetchone()[0]
+
+        # Percentage change calculation
+        def calc_pct_change(this_week, last_week):
+            if last_week == 0:
+                return 100.0 if this_week > 0 else 0.0
+            return ((this_week - last_week) / last_week) * 100
+
+        candidates_pct = calc_pct_change(candidates_this_week, candidates_last_week)
+        jobs_pct = calc_pct_change(jobs_this_week, jobs_last_week)
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "candidates": {
+                "this_week": candidates_this_week,
+                "last_week": candidates_last_week,
+                "percentage_change": round(candidates_pct, 1),
+                "mini_graph_data": daily_candidates_data
+            },
+            "jobs": {
+                "this_week": jobs_this_week,
+                "last_week": jobs_last_week,
+                "percentage_change": round(jobs_pct, 1),
+                "mini_graph_data": daily_jobs_data
+            }
+        })
+
+    except Exception as e:
+        print("Error in /dashboard:", e)
+        return jsonify({"error": str(e)}), 500
+
 
 
 

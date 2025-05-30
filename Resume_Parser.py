@@ -444,7 +444,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
     quality_score = compute_resume_quality_score(resume_text)
     links = extract_links_from_text(resume_text)
     cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
-    ai_score = cover_letter_analysis_dict.get("ai_probability", 0)
+    ai_score = cover_letter_analysis_dict.get("ai_writing_score", 0)
 
     # GPT evaluation prompt
     prompt = f"""
@@ -485,6 +485,10 @@ SCORING RUBRIC:
     try:
         gpt_data = json.loads(response.choices[0].message.content.strip())
 
+        # Fallbacks for missing strengths and weaknesses
+        gpt_data["strengths"] = gpt_data.get("strengths") or "Not provided"
+        gpt_data["weaknesses"] = gpt_data.get("weaknesses") or "Not provided"
+
         for key in [
             "score", "summary", "strengths", "weaknesses",
             "experience_years", "education_level", "skills_matched_pct", "resume_quality_score",
@@ -514,8 +518,8 @@ SCORING RUBRIC:
         return {
             "score": 0,
             "summary": "Evaluation error.",
-            "strengths": "",
-            "weaknesses": "",
+            "strengths": "Not provided",
+            "weaknesses": "Not provided",
             "experience_years": 0,
             "education_level": "",
             "skills_matched_pct": 0,
@@ -575,9 +579,21 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     technical_skills_list = normalize_skill_list(gpt_result.get("technical_skills", []))
     soft_skills_list = normalize_skill_list(gpt_result.get("soft_skills", []))
 
+    # Convert strengths and weaknesses to strings if they are dicts/lists
+    strengths = (
+        json.dumps(gpt_result["strengths"])
+        if isinstance(gpt_result["strengths"], (dict, list))
+        else gpt_result["strengths"]
+    )
+    weaknesses = (
+        json.dumps(gpt_result["weaknesses"])
+        if isinstance(gpt_result["weaknesses"], (dict, list))
+        else gpt_result["weaknesses"]
+    )
+
     args = (
         job_id, name, email, phone, resume_url,
-        gpt_result["score"], gpt_result["summary"], gpt_result["strengths"], gpt_result["weaknesses"],
+        gpt_result["score"], gpt_result["summary"], strengths, weaknesses,
         gpt_result["experience_years"], gpt_result["education_level"], gpt_result["skills_matched_pct"],
         gpt_result["certifications"], resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
         gpt_result["linkedin_url"], technical_skills_list, soft_skills_list,
@@ -620,6 +636,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     conn.commit()
     cur.close()
     conn.close()
+
 
 
 
