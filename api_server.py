@@ -296,7 +296,7 @@ def get_statistics():
             for r in rows if r[1] is not None and r[2] is not None
         ]
 
-        # 2. Most Applied Jobs using CTE
+        # 2. Most Applied Jobs
         cur.execute("""
             WITH ranked_resumes AS (
                 SELECT
@@ -333,7 +333,7 @@ def get_statistics():
             for r in most_applied_jobs_rows
         ]
 
-        # 3. Applications Timeline — now includes job_title
+        # 3. Applications Timeline — Include job_title for job-based filter
         cur.execute("""
             SELECT DATE(r.application_date), j.job_title, COUNT(*) as count
             FROM resumes r
@@ -345,7 +345,7 @@ def get_statistics():
         timeline_rows = cur.fetchall()
         application_timeline = [
             {
-                "date": r[0] if isinstance(r[0], str) else r[0].isoformat(),
+                "date": r[0].isoformat(),
                 "job_title": r[1],
                 "count": r[2]
             }
@@ -364,6 +364,8 @@ def get_statistics():
     except Exception as e:
         print("Error in /statistics:", e)
         return jsonify({"error": str(e)}), 500
+
+
 
 @app.route("/statistics/distributions", methods=["GET"])
 def get_distributions():
