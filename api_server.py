@@ -194,7 +194,8 @@ def get_candidates():
                    r.technical_skills, r.soft_skills,
                    r.portfolio_url, r.github_url, r.linkedin_url,
                    r.summary, r.strengths, r.weaknesses,
-                   r.resume_url, r.resume_quality_score
+                   r.resume_url, r.resume_quality_score,
+                   r.skill_match_breakdown 
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -216,11 +217,11 @@ def get_candidates():
                 "skill_match": row[7],
                 "certifications": row[8],
                 "cover_letter_analysis": row[9] if row[9] else {
-    "analysis": "No cover letter provided.",
-    "issues": [],
-    "recommendation": "Cover letter missing - request one from candidate",
-},
-"ai_writing_score": row[10] if row[10] is not None else 0,
+                    "analysis": "No cover letter provided.",
+                    "issues": [],
+                    "recommendation": "Cover letter missing - request one from candidate",
+                },
+                "ai_writing_score": row[10] if row[10] is not None else 0,
                 "submitted_at": row[11],
                 "technical_skills": row[12] or "",
                 "soft_skills": row[13] or "",
@@ -231,8 +232,8 @@ def get_candidates():
                 "strengths": row[18] or "",
                 "weaknesses": row[19] or "",
                 "resume_url": row[20] or "",
-                "resume_quality_score": row[21] or 0
-                
+                "resume_quality_score": row[21] or 0,
+                "skill_match_breakdown": row[22] or ""  
             }
             for row in rows
         ]
@@ -241,6 +242,7 @@ def get_candidates():
     except Exception as e:
         logging.exception("Error fetching candidates")
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/statistics", methods=["GET"])

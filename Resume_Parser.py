@@ -13,6 +13,9 @@ from typing import Dict, Any, List
 from openai import OpenAI
 from mindee import Client, AsyncPredictResponse, product
 import re
+import spacy
+from rapidfuzz import fuzz
+
 
 from copyleaks_client import check_ai_content, check_plagiarism
 
@@ -21,6 +24,9 @@ from copyleaks_client import check_ai_content, check_plagiarism
 mindee_api_key = os.getenv("MINDEE_API_KEY")
 mindee_client = mindee.Client(api_key=mindee_api_key)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Load the small English model
+nlp = spacy.load("en_core_web_sm")
 
 my_endpoint = mindee_client.create_endpoint(
     account_name="EtherealSonder",
@@ -87,8 +93,13 @@ def calculate_experience_years(experiences: List[Any]) -> float:
     return round(total_months / 12, 1)
 
 
-def extract_education_level(education_input) -> str:
-    # Flatten and lowercase input
+def extract_education_level(education_input, resume_text="") -> str:
+    """
+    Extract education level from structured education input or fallback to scanning the entire resume text.
+    Select the highest-priority degree level if multiple are found.
+    """
+
+    # Flatten and normalize input
     if hasattr(education_input, "values"):
         values = [v.value.lower() for v in education_input.values if hasattr(v, "value") and v.value]
         education_str = " ".join(values)
@@ -97,19 +108,80 @@ def extract_education_level(education_input) -> str:
     else:
         education_str = str(education_input).lower()
 
-    # Normalize and search
-    if re.search(r"ph\.?d|doctorate|doctoral", education_str):
-        return "PhD"
-    elif re.search(r"master|msc|m\.?a|mfa", education_str):
-        return "Master's"
-    elif re.search(r"bachelor|b\.?a|b\.?sc|bfa", education_str):
-        return "Bachelor's"
-    elif re.search(r"diploma|associate", education_str):
-        return "Diploma"
-    elif re.search(r"high school|secondary|intermediate", education_str):
-        return "High School"
-    else:
-        return "Other"
+    print("\nFlattened education string:", education_str)
+
+    # If structured data is empty, fallback to scanning full resume text
+    if not education_str.strip() and resume_text:
+        print("No structured education data found, scanning full resume text instead.")
+        education_str = resume_text.lower()
+
+    # Clean up text: remove punctuation for simpler matching
+    education_str = re.sub(r"[^a-z\s]", "", education_str)
+
+    # Priority order mapping
+    priority_levels = [
+        ("PhD", ["phd", "doctorate", "doctoral", "doctor of philosophy"]),
+        ("Master's", ["master", "msc", "m sc", "m a", "mfa", "meng", "ms", "mtech"]),
+        ("Bachelor's", ["bachelor", "bsc", "b sc", "ba", "bfa", "beng", "btech", "b e"]),
+        ("Diploma", ["diploma", "associate", "pg diploma"]),
+        ("High School", ["high school", "secondary", "intermediate", "12th", "10th", "senior school"])
+    ]
+
+    # Initialize found levels
+    found_levels = set()
+
+    # spaCy token-level matching
+    doc = nlp(education_str)
+    for token in doc:
+        token_text = token.text.lower()
+        for level, keywords in priority_levels:
+            for keyword in keywords:
+                if keyword in token_text:
+                    print(f"Matched {level} in token: '{token.text}' (keyword: '{keyword}')")
+                    found_levels.add(level)
+
+    # Regex-based fallback scanning whole text
+    for level, keywords in priority_levels:
+        for keyword in keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", education_str):
+                print(f"Regex matched {level} (keyword: '{keyword}')")
+                found_levels.add(level)
+
+    # Select the highest priority level found
+    for level, _ in priority_levels:
+        if level in found_levels:
+            print(f"Selected highest priority level: {level}")
+            return level
+
+    print(" No match found. Returning 'Other'")
+    return "Other"
+    
+def check_education_level_match(expected_level: str, candidate_level: str) -> bool:
+    """
+    Determine if the candidate's education level meets or exceeds the expected level.
+    If expected level is 'No expectation on education level', always return True.
+    """
+
+    # Priority order for comparison (higher number = higher level)
+    priority = {
+        "PhD": 5,
+        "Master's": 4,
+        "Bachelor's": 3,
+        "Diploma": 2,
+        "High School": 1,
+        "Other": 0
+    }
+
+    if expected_level == "No expectation on education level":
+        return True
+
+    # Handle missing or unknown candidate education level
+    if candidate_level not in priority:
+        candidate_level = "Other"
+
+    # Compare priority
+    return priority.get(candidate_level, 0) >= priority.get(expected_level, 0)
+
 
 def extract_soft_skills(resume_text: str, cover_letter: str = "") -> List[str]:
     soft_skills_keywords = [
@@ -132,28 +204,72 @@ def extract_soft_skills(resume_text: str, cover_letter: str = "") -> List[str]:
 def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", " ", text.lower()).strip()
 
-def compute_skill_match(resume_skills: List[str], job_description: str) -> float:
-    if not resume_skills or not job_description:
-        return 0.0
+def compute_skill_match(resume_technical_skills, job_expected_technical_skills, candidate_name, job_id):
+    """
+    Compute % skill match between resume and job expectations using advanced fuzzy matching and spaCy similarity.
+    Return match % and breakdown text (as a string, not a file path).
+    """
 
-    job_desc_text = normalize(job_description)
-    matched_skills = 0
+    # Lowercase for normalization
+    resume_skills_lower = [skill.lower() for skill in resume_technical_skills]
+    job_skills_lower = [skill.lower() for skill in job_expected_technical_skills]
 
-    for skill in resume_skills:
-        if not skill:
-            continue
-        skill_norm = normalize(skill)
-        # Partial match
-        if skill_norm in job_desc_text:
-            matched_skills += 1
-        else:
-            # Try fuzzy multi-word match
-            tokens = skill_norm.split()
-            if any(token in job_desc_text for token in tokens if len(token) > 2):
-                matched_skills += 0.5  # partial credit
+    matched_skills = []
+    missing_skills = []
 
-    score = (matched_skills / len(resume_skills)) * 100
-    return round(score, 2)
+    for job_skill in job_skills_lower:
+        matched = False
+
+        #  Fuzzy match (RapidFuzz partial_ratio)
+        for resume_skill in resume_skills_lower:
+            fuzzy_score = fuzz.partial_ratio(job_skill, resume_skill)
+            if fuzzy_score > 80:  # threshold for “good enough” match
+                matched_skills.append(job_skill)
+                matched = True
+                break
+
+        #  If no fuzzy match, fallback to spaCy similarity (optional)
+        if not matched:
+            job_doc = nlp(job_skill)
+            for resume_skill in resume_skills_lower:
+                resume_doc = nlp(resume_skill)
+                similarity = job_doc.similarity(resume_doc)
+                if similarity > 0.8:  # threshold for semantic similarity
+                    matched_skills.append(job_skill)
+                    matched = True
+                    break
+
+        if not matched:
+            missing_skills.append(job_skill)
+
+    # Remove duplicates
+    matched_skills = list(set(matched_skills))
+
+    # Compute match %
+    match_pct = (len(matched_skills) / len(job_skills_lower)) * 100 if job_skills_lower else 0.0
+
+    # Create breakdown
+    breakdown_text = f"""
+Skill Match Breakdown for {candidate_name} (Job ID: {job_id})
+
+Expected Technical Skills ({len(job_skills_lower)}):
+{', '.join(job_expected_technical_skills)}
+
+Candidate Technical Skills ({len(resume_skills_lower)}):
+{', '.join(resume_technical_skills)}
+
+Matched Skills ({len(matched_skills)}):
+{', '.join(matched_skills)}
+
+Missing Skills ({len(missing_skills)}):
+{', '.join(missing_skills)}
+
+Skill Match Percentage: {match_pct:.2f}%
+""".strip()
+
+    return match_pct, breakdown_text
+
+
 
 def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> dict:
     if not cover_letter.strip():
@@ -396,7 +512,7 @@ def extract_technical_skills(text: str) -> List[str]:
 
 
 
-def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_letter: str = "") -> Dict[str, Any]:
+def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "") -> Dict[str, Any]:
     from collections import defaultdict
 
     technical_skills_field = resume_data.get("technical_skills")
@@ -425,7 +541,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
 
     # Resume full text for scanning
     resume_text = '\n'.join([f"{k}: {get_value(v)}" for k, v in resume_data.items()])
-    
+
     # Extract technical & soft skills from entire text
     extracted_section_skills = extract_technical_skills(resume_text)
     extracted_soft_skills = extract_soft_skills(resume_text, cover_letter)
@@ -439,12 +555,27 @@ def evaluate_resume(resume_data: Dict[str, Any], job_description: str, cover_let
     certifications_list = certifications.values if certifications else []
     experience_entries = experience_field.values if experience_field and hasattr(experience_field, "values") else []
     experience_years = calculate_experience_years(experience_entries)
-    education_level = extract_education_level(get_value(education_raw))
-    skill_match_pct = compute_skill_match(final_technical, job_description)
+    education_level = extract_education_level(get_value(education_raw), resume_text)
+    expected_education_level = job.get("expected_education_level", "No expectation on education level")
+
+    # Use the new function
+    education_level_match = check_education_level_match(expected_education_level, education_level)
+    print("Education level match (bool):", education_level_match)
     quality_score = compute_resume_quality_score(resume_text)
     links = extract_links_from_text(resume_text)
     cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
     ai_score = cover_letter_analysis_dict.get("ai_writing_score", 0)
+
+    # Compute technical skill match and breakdown text
+    expected_technical_skills = job.get("expected_technical_skills", [])
+    candidate_name = get_value(resume_data.get("full_name", "unknown"))
+    job_id = job.get("id")
+    skill_match_pct, breakdown_text = compute_skill_match(
+        final_technical,
+        expected_technical_skills,
+        candidate_name,
+        job_id
+    )
 
     # GPT evaluation prompt
     prompt = f"""
@@ -465,25 +596,33 @@ SCORING RUBRIC:
 - Certifications: (10%)
 
 ### Job Description:
-{job_description.strip()}
+{job['job_description'].strip()}
 
 ### Resume:
 {resume_text.strip()}
 """
-
     if cover_letter:
         prompt += f"\n### Cover Letter:\n{cover_letter.strip()}"
 
     response = openai_client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": "Return valid JSON only. No prose or comments."},
             {"role": "user", "content": prompt}
         ]
     )
 
+    raw_output = response.choices[0].message.content.strip()
+    print("Raw GPT output:", repr(raw_output))  # Debug!
+
+    # Remove Markdown fences if present
+    if raw_output.startswith("```"):
+        raw_output = raw_output.strip("`")
+        if raw_output.startswith("json"):
+            raw_output = raw_output[4:].strip()
+
     try:
-        gpt_data = json.loads(response.choices[0].message.content.strip())
+        gpt_data = json.loads(raw_output)
 
         # Fallbacks for missing strengths and weaknesses
         gpt_data["strengths"] = gpt_data.get("strengths") or "Not provided"
@@ -507,6 +646,7 @@ SCORING RUBRIC:
             "technical_skills": final_technical,
             "soft_skills": final_soft,
             "resume_quality_score": quality_score,
+            "skill_match_breakdown": breakdown_text,  # now storing text directly
             **links
         })
 
@@ -514,7 +654,7 @@ SCORING RUBRIC:
 
     except Exception as e:
         print("Failed to parse GPT output:", e)
-        print("Raw output:", response.choices[0].message.content)
+        print("Raw output after cleanup:", raw_output)
         return {
             "score": 0,
             "summary": "Evaluation error.",
@@ -529,7 +669,8 @@ SCORING RUBRIC:
             "resume_quality_score": 0,
             "portfolio_url": "",
             "github_url": "",
-            "linkedin_url": ""
+            "linkedin_url": "",
+            "skill_match_breakdown": ""  # fallback
         }
 
 
@@ -563,7 +704,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     job_id = row[0] if row else None
     if not job_id:
         cur.execute("INSERT INTO jobs (job_title, job_description, client_id) VALUES (%s, %s, %s) RETURNING id;",
-                    (job_title, "Placeholder description", client_id))
+                     (job_title, "Placeholder description", client_id))
         job_id = cur.fetchone()[0]
 
     def normalize_skill_list(value):
@@ -581,24 +722,25 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
 
     # Convert strengths and weaknesses to strings if they are dicts/lists
     strengths = (
-        json.dumps(gpt_result["strengths"])
-        if isinstance(gpt_result["strengths"], (dict, list))
-        else gpt_result["strengths"]
+        json.dumps(gpt_result.get("strengths", "Not provided"))
+        if isinstance(gpt_result.get("strengths", "Not provided"), (dict, list))
+        else gpt_result.get("strengths", "Not provided")
     )
     weaknesses = (
-        json.dumps(gpt_result["weaknesses"])
-        if isinstance(gpt_result["weaknesses"], (dict, list))
-        else gpt_result["weaknesses"]
+        json.dumps(gpt_result.get("weaknesses", "Not provided"))
+        if isinstance(gpt_result.get("weaknesses", "Not provided"), (dict, list))
+        else gpt_result.get("weaknesses", "Not provided")
     )
 
     args = (
         job_id, name, email, phone, resume_url,
-        gpt_result["score"], gpt_result["summary"], strengths, weaknesses,
-        gpt_result["experience_years"], gpt_result["education_level"], gpt_result["skills_matched_pct"],
-        gpt_result["certifications"], resume_source, gpt_result["portfolio_url"], gpt_result["github_url"],
-        gpt_result["linkedin_url"], technical_skills_list, soft_skills_list,
-        gpt_result["resume_quality_score"], json.dumps(gpt_result["cover_letter_analysis"]),
-        gpt_result["ai_writing_score"], datetime.utcnow()
+        gpt_result.get("score", 0), gpt_result.get("summary", ""), strengths, weaknesses,
+        gpt_result.get("experience_years", 0), gpt_result.get("education_level", ""), gpt_result.get("skills_matched_pct", 0),
+        gpt_result.get("certifications", ""), resume_source, gpt_result.get("portfolio_url", ""), gpt_result.get("github_url", ""),
+        gpt_result.get("linkedin_url", ""), technical_skills_list, soft_skills_list,
+        gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("cover_letter_analysis", {})),
+        gpt_result.get("ai_writing_score", 0), gpt_result.get("skill_match_breakdown", ""),
+        datetime.utcnow()
     )
 
     cur.execute("""
@@ -606,10 +748,10 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
             experience_years, education_level, skills_matched_pct, certifications, resume_source,
             portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score,
-            cover_letter_analysis, ai_writing_score, application_date
+            cover_letter_analysis, ai_writing_score, skill_match_breakdown, application_date
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (email, job_id) DO UPDATE
         SET phone = EXCLUDED.phone,
@@ -630,6 +772,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             resume_quality_score = EXCLUDED.resume_quality_score,
             cover_letter_analysis = EXCLUDED.cover_letter_analysis,
             ai_writing_score = EXCLUDED.ai_writing_score,
+            skill_match_breakdown = EXCLUDED.skill_match_breakdown,
             application_date = EXCLUDED.application_date;
     """, args)
 
@@ -653,12 +796,27 @@ def get_job_description_from_db(job_title):
 
 def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="", client_id="", resume_source="form", resume_url=""):
     parsed_resume = read_resume(file_path)
-    job_description = get_job_description_from_db(job_title)
-    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job_description, cover_letter)
+    job = get_job_record_from_db(job_title, client_id)  # Fetch full job record as dict
+
+    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job, cover_letter)
 
     # Save to DB (no Copyleaks metrics)
     save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url, client_id, resume_source)
     return gpt_result
+
+def get_job_record_from_db(job_title: str, client_id: str) -> Dict[str, Any]:
+    db_url = os.getenv("DATABASE_URL")
+    up.uses_netloc.append("postgres")
+    conn = psycopg2.connect(db_url)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
+    row = cur.fetchone()
+    colnames = [desc[0] for desc in cur.description]
+    job_record = dict(zip(colnames, row)) if row else {}
+    cur.close()
+    conn.close()
+    return job_record
+
 
 
 if __name__ == "__main__":

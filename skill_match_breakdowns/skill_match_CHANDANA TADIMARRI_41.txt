@@ -1,0 +1,15 @@
+Skill Match Breakdown for CHANDANA TADIMARRI (Job ID: 41)
+
+Expected Technical Skills (8):
+Point cloud data handling, Machine learning, Deep learning frameworks, 3D vision techniques, BIM software ecosystems, Programming in Python or C++, Photogrammetry, LiDAR
+
+Candidate Technical Skills (11):
+AI & ML, GitHub, GitLab, Java, Neural Networks, Power BI, Python, R, SQL, Supervised and Unsupervised learning algorithms, Tableau
+
+Matched Skills (0):
+
+
+Missing Skills (8):
+programming in python or c++, lidar, 3d vision techniques, point cloud data handling, deep learning frameworks, machine learning, bim software ecosystems, photogrammetry
+
+Skill Match Percentage: 0.00%
