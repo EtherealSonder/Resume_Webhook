@@ -7,7 +7,8 @@ oauth2client
 google-api-python-client
 google-auth
 psycopg2-binary
-flask
 flask-cors
 python-dotenv
 boto3
+spacy
+rapidfuzz
