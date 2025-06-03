@@ -17,3 +17,4 @@ PyMuPDF
 validators
 tldextract
 language_tool_python
+textstat
