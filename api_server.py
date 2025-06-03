@@ -194,7 +194,7 @@ def get_candidates():
                    r.technical_skills, r.soft_skills,
                    r.portfolio_url, r.github_url, r.linkedin_url,
                    r.summary, r.strengths, r.weaknesses,
-                   r.resume_url, r.resume_quality_score,
+                   r.resume_url, r.resume_quality_score,r.resume_quality_breakdown,
                    r.skill_match_breakdown 
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
@@ -233,7 +233,8 @@ def get_candidates():
                 "weaknesses": row[19] or "",
                 "resume_url": row[20] or "",
                 "resume_quality_score": row[21] or 0,
-                "skill_match_breakdown": row[22] or ""  
+                "resume_quality_breakdown": row[22] or {},
+                "skill_match_breakdown": row[23] or ""  
             }
             for row in rows
         ]

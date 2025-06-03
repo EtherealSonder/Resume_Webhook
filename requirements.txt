@@ -12,3 +12,8 @@ python-dotenv
 boto3
 spacy
 rapidfuzz
+urlextract
+PyMuPDF
+validators
+tldextract
+language_tool_python

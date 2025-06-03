@@ -15,7 +15,14 @@ from mindee import Client, AsyncPredictResponse, product
 import re
 import spacy
 from rapidfuzz import fuzz
-
+import re
+from urlextract import URLExtract
+import fitz  # PyMuPDF
+import validators
+import tldextract
+import socket
+from typing import Tuple, Dict
+import language_tool_python  # grammar/spell-check
 
 from copyleaks_client import check_ai_content, check_plagiarism
 
@@ -45,6 +52,8 @@ def read_resume(file_path):
 
 def get_value(x):
     return x.value if hasattr(x, "value") else x
+
+#EXPERIENCE YEARS CALCULATION
 
 MONTH_MAP = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -92,6 +101,57 @@ def calculate_experience_years(experiences: List[Any]) -> float:
 
     return round(total_months / 12, 1)
 
+def check_experience_match(expected_range: str, expected_level: str, candidate_years: float) -> bool:
+    """
+    Determine if the candidate's experience years meet or exceed the expected range or level.
+    If both expected_range and expected_level are 'No expectation on experience', return True.
+    """
+
+    # If no expectations are set, always return True
+    if expected_range == "No expectation on experience" and expected_level == "No expectation on experience":
+        return True
+
+    # Helper to parse expected_range text to a numeric lower bound (e.g., '2+ years' -> 2)
+    def parse_range_to_min_years(text: str) -> float:
+        match = re.search(r"(\d+(\.\d+)?)", text)
+        if match:
+            return float(match.group(1))
+        return 0.0
+
+    # Convert expected_range to numeric min years
+    expected_range_min_years = parse_range_to_min_years(expected_range or "")
+
+    # Mapping from experience_level to numeric ranges
+    level_to_range = {
+        "Fresher": (0, 0),
+        "Beginner": (0, 1),
+        "Junior": (1, 2),
+        "Mid-Level": (2, 4),
+        "Experienced": (4, 7),
+        "Advanced": (7, 10),
+        "Expert": (10, 15),
+        "Veteran": (15, 100)  # 100 as an arbitrary upper limit
+    }
+
+    # Check against experience level
+    level_range = level_to_range.get(expected_level, (0, 100))  # default to 0â€“100 if unknown
+
+    # Decision logic:
+    # If expected_range is not default, use it
+    if expected_range != "No expectation on experience" and expected_range.strip():
+        return candidate_years >= expected_range_min_years
+
+    # Else if expected_level is not default, check against level range
+    if expected_level != "No expectation on experience" and expected_level.strip():
+        return level_range[0] <= candidate_years <= level_range[1]
+
+    # If both expectations are somehow empty, fallback to True
+    return True
+
+
+
+
+#EDUCATION LEVEL CALCULATION
 
 def extract_education_level(education_input, resume_text="") -> str:
     """
@@ -182,27 +242,12 @@ def check_education_level_match(expected_level: str, candidate_level: str) -> bo
     # Compare priority
     return priority.get(candidate_level, 0) >= priority.get(expected_level, 0)
 
-
-def extract_soft_skills(resume_text: str, cover_letter: str = "") -> List[str]:
-    soft_skills_keywords = [
-        "communication", "teamwork", "collaboration", "adaptability", "leadership",
-        "problem-solving", "creativity", "initiative", "critical thinking",
-        "time management", "empathy", "work ethic", "attention to detail",
-        "decision making", "multitasking", "flexibility", "dependability"
-    ]
-
-    combined_text = f"{resume_text}\n{cover_letter}".lower()
-    found = set()
-
-    for skill in soft_skills_keywords:
-        if skill in combined_text:
-            found.add(skill)
-
-    return list(found)
-
-
 def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]", " ", text.lower()).strip()
+
+
+
+#COMPUTE SKILL MATCH
 
 def compute_skill_match(resume_technical_skills, job_expected_technical_skills, candidate_name, job_id):
     """
@@ -223,7 +268,7 @@ def compute_skill_match(resume_technical_skills, job_expected_technical_skills, 
         #  Fuzzy match (RapidFuzz partial_ratio)
         for resume_skill in resume_skills_lower:
             fuzzy_score = fuzz.partial_ratio(job_skill, resume_skill)
-            if fuzzy_score > 80:  # threshold for “good enough” match
+            if fuzzy_score > 80:  # threshold for â€œgood enoughâ€ match
                 matched_skills.append(job_skill)
                 matched = True
                 break
@@ -270,6 +315,8 @@ Skill Match Percentage: {match_pct:.2f}%
     return match_pct, breakdown_text
 
 
+
+#ANALYZE COVER LETTER
 
 def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> dict:
     if not cover_letter.strip():
@@ -347,110 +394,234 @@ Return a JSON with these numeric fields and a short analysis.
             "recommendation": "Unable to evaluate authenticity."
         }
 
-def extract_links_from_text(text: str) -> Dict[str, str]:
+
+
+#EXTRACT LINKS
+
+def is_real_domain(url: str) -> bool:
+    """
+    Validates if the domain in the URL can actually be resolved in DNS.
+    """
+    try:
+        hostname = url.replace("https://", "").replace("http://", "").split("/")[0]
+        socket.gethostbyname(hostname)
+        return True
+    except Exception as e:
+        print(f"Domain resolution failed for {url}: {e}")
+        return False
+
+def extract_links_from_resume(resume_text: str, pdf_path: str = None) -> dict:
+    """
+    Robust link extraction with domain resolution.
+    Returns dict: {'portfolio_url', 'github_url', 'linkedin_url'}
+    """
     links = {"portfolio_url": "", "github_url": "", "linkedin_url": ""}
+    print("\n===== Starting FINAL robust link extraction =====")
 
-    # General URL regex
-    url_pattern = re.compile(
-        r'(https?://)?(www\.)?[\w.-]+\.(com|net|org|io|design|art|dev)(/[^\s]*)?',
-        re.IGNORECASE
-    )
+    all_urls = set()
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+    #  Embedded hyperlinks
+    if pdf_path:
+        try:
+            doc = fitz.open(pdf_path)
+            for page_num, page in enumerate(doc):
+                for link in page.get_links():
+                    uri = link.get("uri")
+                    if uri and validators.url(uri.strip()):
+                        all_urls.add(uri.strip())
+                        print(f"Embedded link found on page {page_num + 1}: {uri}")
+            doc.close()
+        except Exception as e:
+            print("Error extracting embedded PDF links:", e)
+
+    #  Text-based links (urlextract)
+    extractor = URLExtract()
+    try:
+        extracted_urls = extractor.find_urls(resume_text)
+        for url in extracted_urls:
+            normalized_url = url if url.startswith("http") else "https://" + url
+            if validators.url(normalized_url.strip()):
+                all_urls.add(normalized_url.strip())
+        print(f"URLs found by urlextract: {extracted_urls}")
+    except Exception as e:
+        print("Error with urlextract:", e)
+
+    #  Fallback regex for real http(s) links
+    regex_pattern = re.compile(r'https?://[^\s]+', re.IGNORECASE)
+    regex_urls = regex_pattern.findall(resume_text)
+    for url in regex_urls:
+        if validators.url(url.strip()):
+            all_urls.add(url.strip())
+    print(f"URLs found by fallback regex: {regex_urls}")
+
+    print(f"Unique valid URLs after normalization and syntax validation: {all_urls}")
+
+    #  Final domain resolution validation and classification
+    for url in all_urls:
+        if not is_real_domain(url):
+            print(f"Skipping fake URL (does not resolve): {url}")
             continue
 
-        match = re.search(url_pattern, line)
-        if match:
-            url = match.group(0)
-            if "github.com" in url and not links["github_url"]:
-                links["github_url"] = "https://" + url if not url.startswith("http") else url
-            elif "linkedin.com" in url and not links["linkedin_url"]:
-                links["linkedin_url"] = "https://" + url if not url.startswith("http") else url
-            elif any(domain in url for domain in [
-                "artstation", "behance", "dribbble", "myportfolio", "deviantart", ".design"
-            ]) and not links["portfolio_url"]:
-                links["portfolio_url"] = "https://" + url if not url.startswith("http") else url
-            elif not links["portfolio_url"] and url.endswith((".com", ".design")):
-                links["portfolio_url"] = "https://" + url if not url.startswith("http") else url
+        url_lower = url.lower()
+        if "github" in url_lower and not links["github_url"]:
+            links["github_url"] = url
+            print("Classified as GitHub URL.")
+        elif "linkedin" in url_lower and not links["linkedin_url"]:
+            links["linkedin_url"] = url
+            print("Classified as LinkedIn URL.")
+        elif not links["portfolio_url"]:
+            links["portfolio_url"] = url
+            print("Classified as Portfolio URL.")
 
+    print("\n===== Final Links Dictionary =====")
+    print(links)
     return links
 
 
-def compute_resume_quality_score(text: str) -> int:
-    score = 0
+
+#COMPUTE RESUME QUALITY SCORE
+
+def check_structure(text: str) -> Tuple[float, str]:
+    required_sections = ["experience", "education", "skills", "contact"]
+    optional_sections = ["certifications", "projects", "awards", "summary"]
     text_lower = text.lower()
 
-    #  Word Count (ideal range: 300–1500)
+    found_required = sum(1 for s in required_sections if s in text_lower)
+    found_optional = sum(1 for s in optional_sections if s in text_lower)
+
+    score = (found_required / len(required_sections)) * 0.7 + (found_optional / len(optional_sections)) * 0.3
+    explanation = f"Found {found_required} of 4 required sections and {found_optional} optional sections."
+    return score, explanation
+
+
+def check_section_headers(text: str) -> Tuple[float, str]:
+    lines = text.splitlines()
+    header_lines = [line for line in lines if line.strip().isupper() or line.endswith(":")]
+    score = min(len(header_lines) / 6, 1.0)
+    explanation = f"Detected {len(header_lines)} header-like lines."
+    return score, explanation
+
+
+def check_word_count(text: str) -> Tuple[float, str]:
     word_count = len(text.split())
-    if 300 <= word_count <= 1500:
-        word_count_score = 100
-    elif 150 < word_count < 300:
-        word_count_score = 60  # Too short
-    elif word_count > 1500:
-        word_count_score = 40  # Too verbose
+    if 300 <= word_count <= 600:
+        return 1.0, f"Word count is {word_count}, ideal range."
+    elif 150 < word_count < 300 or 600 < word_count <= 1000:
+        return 0.7, f"Word count is {word_count}, acceptable but could improve."
     else:
-        word_count_score = 20  # very poor
+        return 0.3, f"Word count is {word_count}, outside recommended range."
 
-    #  Section Coverage: Experience, Skills, Education
-    required_sections = ["experience", "education", "skills"]
-    section_hits = sum(1 for sec in required_sections if sec in text_lower)
-    section_coverage_score = (section_hits / len(required_sections)) * 100
 
-    # Bullet Points Usage (good for formatting and clarity)
-    bullet_count = text.count(".") + text.count("- ")
-    if bullet_count >= 8:
-        bullet_points_score = 100
-    elif bullet_count >= 4:
-        bullet_points_score = 70
+def check_bullet_points(text: str) -> Tuple[float, str]:
+    # Count various bullet styles
+    bullet_points = text.count("- ") + text.count("â€¢") + text.count("â€“")
+    if bullet_points >= 10:
+        score = 1.0
+    elif bullet_points >= 5:
+        score = 0.7
     else:
-        bullet_points_score = 30
+        score = 0.3
+    explanation = f"Found {bullet_points} bullet points."
+    return score, explanation
 
-    # Contact Info Presence
-    contact_info_score = 0
+
+
+def check_contact_info(text: str) -> Tuple[float, str]:
+    score = 0
+    explanation = []
+
     if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text):
-        contact_info_score += 40
-    if re.search(r"(linkedin\.com|github\.com|artstation\.com)", text_lower):
-        contact_info_score += 30
+        score += 0.5
+        explanation.append("Email found.")
     if re.search(r"\+?\d{7,}", text):
-        contact_info_score += 30
-    contact_info_score = min(contact_info_score, 100)
+        score += 0.3
+        explanation.append("Phone number found.")
+    extractor = URLExtract()
+    links = extractor.find_urls(text)
+    if any("linkedin" in link.lower() or "github" in link.lower() for link in links):
+        score += 0.2
+        explanation.append("Professional link found.")
+    
+    return min(score, 1.0), " ".join(explanation) or "No contact info found."
 
-    #  Link Presence (GitHub, Portfolio, LinkedIn)
-    link_keywords = ["github", "linkedin", "portfolio", "artstation", "behance"]
-    link_score = 100 if any(link in text_lower for link in link_keywords) else 40
 
-    # Visual Formatting Heuristics (line count, diversity, etc.)
-    formatting_score = 0
-    if len(set(text)) > 30 and "." in text and bullet_count > 2:
-        formatting_score += 60
-    if len(text.split("\n")) >= 20:
-        formatting_score += 40
-    formatting_score = min(formatting_score, 100)
+def check_formatting(text: str) -> Tuple[float, str]:
+    lines = text.splitlines()
+    has_spacing = any(line.strip() == "" for line in lines)
+    if has_spacing:
+        return 1.0, "Good line spacing detected."
+    return 0.5, "Minimal spacing detected."
 
-    # Weighted combination of all components
-    resume_quality_score = (
-        word_count_score * 0.2 +
-        section_coverage_score * 0.2 +
-        bullet_points_score * 0.15 +
-        contact_info_score * 0.1 +
-        link_score * 0.15 +
-        formatting_score * 0.2
-    )
 
-    return round(min(max(resume_quality_score, 0), 100), 2)
+def check_consistency(text: str) -> Tuple[float, str]:
+    if re.search(r"present|current", text.lower()):
+        return 1.0, "Consistent tense usage detected."
+    return 0.7, "Could improve consistency of tense."
 
-def format_list(items: List[Any]) -> str:
-    safe_items = []
-    for item in items:
-        try:
-            if item and hasattr(item, "value") and item.value is not None:
-                safe_items.append(str(item.value))
-        except Exception:
-            continue
-    return ', '.join(safe_items)
 
+
+def check_readability(text: str) -> Tuple[float, str]:
+    tool = language_tool_python.LanguageTool('en-US')
+    matches = tool.check(text)
+    error_count = len(matches)
+    if error_count <= 5:
+        return 1.0, f"Found {error_count} minor grammar/spelling errors."
+    elif error_count <= 15:
+        return 0.7, f"Found {error_count} grammar/spelling errors."
+    else:
+        return 0.4, f"Found {error_count} significant grammar/spelling issues."
+
+
+
+def check_ats_format(file_format: str) -> Tuple[float, str]:
+    if file_format.lower() in ["pdf", "docx"]:
+        return 1.0, f"File format is {file_format}, ATS-friendly."
+    return 0.5, f"File format {file_format} may not be ATS-friendly."
+
+
+def compute_resume_quality_score(text: str, file_format: str = "pdf") -> Tuple[int, Dict]:
+    weights = {
+        "structure": 0.2,
+        "section_headers": 0.05,
+        "word_count": 0.1,
+        "bullet_points": 0.1,
+        "contact_info": 0.1,
+        "formatting": 0.1,
+        "consistency": 0.1,
+        "readability": 0.15,
+        "ats_compatibility": 0.1
+    }
+
+    # Evaluate all modules
+    breakdown = {}
+    modules = {
+        "structure": check_structure,
+        "section_headers": check_section_headers,
+        "word_count": check_word_count,
+        "bullet_points": check_bullet_points,
+        "contact_info": check_contact_info,
+        "formatting": check_formatting,
+        "consistency": check_consistency,
+        "readability": check_readability,
+        "ats_compatibility": lambda text: check_ats_format(file_format)
+    }
+
+    for key, func in modules.items():
+        if key == "ats_compatibility":
+            score, explanation = func(file_format)
+        else:
+            score, explanation = func(text)
+        breakdown[key] = {"score": score, "explanation": explanation}
+
+    # Compute weighted final score
+    final_score = sum(breakdown[k]["score"] * weights[k] for k in weights)
+    return round(final_score * 100, 2), breakdown
+
+
+
+
+
+#EXTRACT SKILLS
 
 def detect_technical_skills_from_text(text: str) -> List[str]:
     known_technical_skills = [
@@ -510,9 +681,38 @@ def extract_technical_skills(text: str) -> List[str]:
 
     return skills
 
+def extract_soft_skills(resume_text: str, cover_letter: str = "") -> List[str]:
+    soft_skills_keywords = [
+        "communication", "teamwork", "collaboration", "adaptability", "leadership",
+        "problem-solving", "creativity", "initiative", "critical thinking",
+        "time management", "empathy", "work ethic", "attention to detail",
+        "decision making", "multitasking", "flexibility", "dependability"
+    ]
+
+    combined_text = f"{resume_text}\n{cover_letter}".lower()
+    found = set()
+
+    for skill in soft_skills_keywords:
+        if skill in combined_text:
+            found.add(skill)
+
+    return list(found)
+
+def format_list(items: List[Any]) -> str:
+    safe_items = []
+    for item in items:
+        try:
+            if item and hasattr(item, "value") and item.value is not None:
+                safe_items.append(str(item.value))
+        except Exception:
+            continue
+    return ', '.join(safe_items)
 
 
-def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "") -> Dict[str, Any]:
+
+#EVALUATE RESUME
+
+def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "", pdf_path: str = None) -> Dict[str, Any]:
     from collections import defaultdict
 
     technical_skills_field = resume_data.get("technical_skills")
@@ -555,14 +755,29 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
     certifications_list = certifications.values if certifications else []
     experience_entries = experience_field.values if experience_field and hasattr(experience_field, "values") else []
     experience_years = calculate_experience_years(experience_entries)
+    expected_experience_range = job.get("expected_experience_range", "No expectation on experience")
+    expected_experience_level = job.get("experience_level", "No expectation on experience")
+
+    # Call the new function to get the boolean
+    experience_level_match = check_experience_match(expected_experience_range, expected_experience_level, experience_years)
+    print("Experience level match (bool):", experience_level_match)
+
     education_level = extract_education_level(get_value(education_raw), resume_text)
     expected_education_level = job.get("expected_education_level", "No expectation on education level")
 
     # Use the new function
     education_level_match = check_education_level_match(expected_education_level, education_level)
     print("Education level match (bool):", education_level_match)
-    quality_score = compute_resume_quality_score(resume_text)
-    links = extract_links_from_text(resume_text)
+ 
+    
+
+    links = extract_links_from_resume(resume_text, job.get("resume_pdf_path", None))
+    
+    print("Final links dictionary:", links)
+    
+    quality_score, quality_breakdown = compute_resume_quality_score(resume_text, file_format="pdf")
+
+
     cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
     ai_score = cover_letter_analysis_dict.get("ai_writing_score", 0)
 
@@ -646,6 +861,7 @@ SCORING RUBRIC:
             "technical_skills": final_technical,
             "soft_skills": final_soft,
             "resume_quality_score": quality_score,
+            "resume_quality_breakdown": quality_breakdown,
             "skill_match_breakdown": breakdown_text,  # now storing text directly
             **links
         })
@@ -667,24 +883,13 @@ SCORING RUBRIC:
             "technical_skills": [],
             "soft_skills": [],
             "resume_quality_score": 0,
+            "resume_quality_breakdown": quality_breakdown,
             "portfolio_url": "",
             "github_url": "",
             "linkedin_url": "",
-            "skill_match_breakdown": ""  # fallback
+            "skill_match_breakdown": "" 
         }
 
-
-
-def normalize_skill_list(value):
-    if isinstance(value, str):
-        try:
-            # Handle JSON-like strings
-            return json.loads(value)
-        except:
-            return [value]
-    elif isinstance(value, list):
-        return [str(v) for v in value if isinstance(v, str)]
-    return []
 
 
 def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id, resume_source="form"):
@@ -720,7 +925,6 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     technical_skills_list = normalize_skill_list(gpt_result.get("technical_skills", []))
     soft_skills_list = normalize_skill_list(gpt_result.get("soft_skills", []))
 
-    # Convert strengths and weaknesses to strings if they are dicts/lists
     strengths = (
         json.dumps(gpt_result.get("strengths", "Not provided"))
         if isinstance(gpt_result.get("strengths", "Not provided"), (dict, list))
@@ -738,7 +942,8 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         gpt_result.get("experience_years", 0), gpt_result.get("education_level", ""), gpt_result.get("skills_matched_pct", 0),
         gpt_result.get("certifications", ""), resume_source, gpt_result.get("portfolio_url", ""), gpt_result.get("github_url", ""),
         gpt_result.get("linkedin_url", ""), technical_skills_list, soft_skills_list,
-        gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("cover_letter_analysis", {})),
+        gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("resume_quality_breakdown", {})), 
+        json.dumps(gpt_result.get("cover_letter_analysis", {})),
         gpt_result.get("ai_writing_score", 0), gpt_result.get("skill_match_breakdown", ""),
         datetime.utcnow()
     )
@@ -747,11 +952,12 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         INSERT INTO resumes (
             job_id, candidate_name, email, phone, resume_url, score, summary, strengths, weaknesses,
             experience_years, education_level, skills_matched_pct, certifications, resume_source,
-            portfolio_url, github_url, linkedin_url, technical_skills, soft_skills, resume_quality_score,
-            cover_letter_analysis, ai_writing_score, skill_match_breakdown, application_date
+            portfolio_url, github_url, linkedin_url, technical_skills, soft_skills,
+            resume_quality_score, resume_quality_breakdown, cover_letter_analysis,
+            ai_writing_score, skill_match_breakdown, application_date
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (email, job_id) DO UPDATE
         SET phone = EXCLUDED.phone,
@@ -770,6 +976,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             technical_skills = EXCLUDED.technical_skills,
             soft_skills = EXCLUDED.soft_skills,
             resume_quality_score = EXCLUDED.resume_quality_score,
+            resume_quality_breakdown = EXCLUDED.resume_quality_breakdown,
             cover_letter_analysis = EXCLUDED.cover_letter_analysis,
             ai_writing_score = EXCLUDED.ai_writing_score,
             skill_match_breakdown = EXCLUDED.skill_match_breakdown,
@@ -798,7 +1005,7 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
     parsed_resume = read_resume(file_path)
     job = get_job_record_from_db(job_title, client_id)  # Fetch full job record as dict
 
-    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job, cover_letter)
+    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job, cover_letter, pdf_path=file_path)
 
     # Save to DB (no Copyleaks metrics)
     save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url, client_id, resume_source)
