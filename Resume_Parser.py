@@ -165,10 +165,11 @@ def check_experience_match(
 
 #EDUCATION LEVEL CALCULATION
 
+
 def extract_education_level(education_input, resume_text="") -> str:
     """
-    Extract education level from structured education input or fallback to scanning the entire resume text.
-    Select the highest-priority degree level if multiple are found.
+    Extract the highest-priority education level from structured input or fallback text.
+    PhD is only matched if explicit keywords (like 'phd', 'doctoral') are found.
     """
 
     # Flatten and normalize input
@@ -182,50 +183,55 @@ def extract_education_level(education_input, resume_text="") -> str:
 
     print("\nFlattened education string:", education_str)
 
-    # If structured data is empty, fallback to scanning full resume text
+    # If structured data is empty, fallback to resume text
+    use_resume_fallback = False
     if not education_str.strip() and resume_text:
         print("No structured education data found, scanning full resume text instead.")
         education_str = resume_text.lower()
+        use_resume_fallback = True
 
-    # Clean up text: remove punctuation for simpler matching
+    # Clean up text for matching
     education_str = re.sub(r"[^a-z\s]", "", education_str)
 
-    # Priority order mapping
+    # Priority level mapping (with clear and strict keywords)
     priority_levels = [
-        ("PhD", ["phd", "doctorate", "doctoral", "doctor of philosophy"]),
+        ("PhD", ["phd", "doctorate", "doctoral", "doctor of philosophy"]),  # STRICT
         ("Master's", ["master", "msc", "m sc", "m a", "mfa", "meng", "ms", "mtech"]),
         ("Bachelor's", ["bachelor", "bsc", "b sc", "ba", "bfa", "beng", "btech", "b e"]),
         ("Diploma", ["diploma", "associate", "pg diploma"]),
         ("High School", ["high school", "secondary", "intermediate", "12th", "10th", "senior school"])
     ]
 
-    # Initialize found levels
     found_levels = set()
 
-    # spaCy token-level matching
+    # spaCy token matching
     doc = nlp(education_str)
     for token in doc:
         token_text = token.text.lower()
         for level, keywords in priority_levels:
             for keyword in keywords:
+                if keyword == "phd" and use_resume_fallback:
+                    continue  # Don't allow PhD guess from fallback text
                 if keyword in token_text:
                     print(f"Matched {level} in token: '{token.text}' (keyword: '{keyword}')")
                     found_levels.add(level)
 
-    # Regex-based fallback scanning whole text
+    # Regex-based fallback
     for level, keywords in priority_levels:
         for keyword in keywords:
+            if keyword == "phd" and use_resume_fallback:
+                continue  # Same PhD block from resume_text
             if re.search(rf"\b{re.escape(keyword)}\b", education_str):
                 print(f"Regex matched {level} (keyword: '{keyword}')")
                 found_levels.add(level)
 
-    # Select the highest priority level found
+    # Pick highest priority match
     for level, _ in priority_levels:
         if level in found_levels:
             print(f"Selected highest priority level: {level}")
             return level
 
-    print(" No match found. Returning 'Other'")
+    print("No match found. Returning 'Other'")
     return "Other"
     
 def check_education_level_match(expected_level: str, candidate_level: str) -> bool:
@@ -330,80 +336,160 @@ Skill Match Percentage: {match_pct:.2f}%
 
 #ANALYZE COVER LETTER
 
-def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str) -> dict:
-    if not cover_letter.strip():
-        return {
-            "analysis": "No cover letter provided.",
-            "relevance": 0,
-            "originality": 0,
-            "tone_consistency": 0,
-            "clarity": 0,
-            "engagement": 0,
-            "ai_writing_score": 0,
-            "recommendation": "Cover letter missing - request one from candidate."
-        }
+def generate_cover_letter_analysis_prompt(cover_letter: str, job: dict, resume_text: str = "") -> str:
+    """
+    Generates a structured GPT prompt to analyze a candidate's cover letter using
+    metrics based on industry best practices, including JD alignment, specificity,
+    company fit, and structure/tone.
+    """
 
-    # GPT-4 Prompt to get nuanced metrics
-    prompt = f"""
-You are a recruiter AI evaluating a cover letter for the following criteria (0-100 scale):
+    system_instructions = (
+        "You are a professional recruiter AI evaluating cover letters for job applications.\n"
+        "Your goal is to rate the cover letter using the following four metrics: JD Alignment,\n"
+        "Evidence & Specificity, Company Fit & Motivation, and Structure & Tone.\n"
+        "You must return your evaluation as valid JSON.\n"
+        "Do not output prose, comments, or markdown formatting.\n"
+        "All scores must be integers between 0 and 100.\n"
+        "For each score, give a 1-2 sentence explanation.\n"
+        "Think step by step internally before generating your final JSON output."
+    )
 
-- relevance
-- originality
-- tone consistency
-- clarity
-- engagement
+    examples = """
+### Examples:
 
-Return a JSON with these numeric fields and a short analysis.
+- Example 1 (Excellent Cover Letter):
+{
+  "jd_alignment_score": {"score": 95, "explanation": "Candidate clearly addressed multiple core responsibilities from the JD, such as executive stakeholder engagement and technical debugging."},
+  "evidence_score": {"score": 90, "explanation": "Gives specific achievements ($10M in revenue), technical projects, and quantified impact."},
+  "company_fit_score": {"score": 92, "explanation": "References Adyen's vision and diversity, showing personal alignment with values."},
+  "structure_tone_score": {"score": 88, "explanation": "Structured with intro, skill alignment, motivation, and conclusion. Tone is confident and professional."},
+  "final_ai_score": 91
+}
 
-### Resume:
-{resume_text.strip()}
+- Example 2 (Mid-level Cover Letter):
+{
+  "jd_alignment_score": {"score": 70, "explanation": "Mentions responsibilities generally but not tied to specific job bullet points."},
+  "evidence_score": {"score": 60, "explanation": "Has some examples, but lacks numbers and depth."},
+  "company_fit_score": {"score": 50, "explanation": "No company-specific mention, just generic excitement."},
+  "structure_tone_score": {"score": 75, "explanation": "Follows intro-body-close, tone is clear and formal."},
+  "final_ai_score": 64
+}
 
-### Cover Letter:
-{cover_letter.strip()}
+- Example 3 (Weak Cover Letter):
+{
+  "jd_alignment_score": {"score": 40, "explanation": "Barely refers to the job posting, only vague skills mentioned."},
+  "evidence_score": {"score": 30, "explanation": "No numbers, impact, or projects are described."},
+  "company_fit_score": {"score": 25, "explanation": "Completely generic, could apply to any company."},
+  "structure_tone_score": {"score": 55, "explanation": "Some basic structure, tone feels stiff or robotic."},
+  "final_ai_score": 38
+}
 """
 
-    try:
-        import json
-        response = openai_client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "Return valid JSON only, no extra comments."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        gpt_data = json.loads(response.choices[0].message.content.strip())
+    jd_details = f"""
+### Job Description Snapshot:
+Responsibilities:
+{job.get('expected_responsibilities', 'N/A')}
 
-        # Calculate ai_writing_score (weighted formula based on 5 metrics)
-        ai_writing_score = (
-            gpt_data.get("relevance", 0) * 0.2 +
-            gpt_data.get("originality", 0) * 0.2 +
-            gpt_data.get("tone_consistency", 0) * 0.2 +
-            gpt_data.get("clarity", 0) * 0.2 +
-            gpt_data.get("engagement", 0) * 0.2
-        )
-        ai_writing_score = round(min(max(ai_writing_score, 0), 100), 2)
+Required Technical Skills:
+{job.get('expected_technical_skills', [])}
 
+Required Soft Skills:
+{job.get('expected_soft_skills', [])}
+
+Required Certifications:
+{job.get('expected_certifications', [])}
+
+Company Culture / Environment:
+{job.get('expected_work_environment', '')}
+"""
+
+    prompt = f"""
+{system_instructions}
+
+### Cover Letter to Evaluate:
+{cover_letter.strip()}
+
+{jd_details}
+
+{examples}
+
+### Evaluation Instructions:
+- Base your evaluation strictly on the job expectations above.
+- Rate each category 0 to 100 and explain each rating.
+- Be detailed and non-generic. Avoid vague feedback.
+- Return the output in this format:
+
+{{
+  "jd_alignment_score": {{"score": <int>, "explanation": "..."}},
+  "evidence_score": {{"score": <int>, "explanation": "..."}},
+  "company_fit_score": {{"score": <int>, "explanation": "..."}},
+  "structure_tone_score": {{"score": <int>, "explanation": "..."}},
+  "final_ai_score": <int>
+}}
+
+Return only valid JSON.
+"""
+
+    return prompt.strip()
+
+
+def analyze_cover_letter_authenticity(resume_text: str, cover_letter: str, job: dict = None) -> dict:
+    """
+    Evaluates the cover letter using advanced GPT prompting based on job expectations.
+    Returns structured scores across four categories with explanations, plus a final AI score.
+    """
+
+    if not cover_letter.strip():
         return {
-            "analysis": gpt_data.get("analysis", ""),
-            "relevance": gpt_data.get("relevance", 0),
-            "originality": gpt_data.get("originality", 0),
-            "tone_consistency": gpt_data.get("tone_consistency", 0),
-            "clarity": gpt_data.get("clarity", 0),
-            "engagement": gpt_data.get("engagement", 0),
-            "ai_writing_score": ai_writing_score,
-            "recommendation": "Cover letter evaluated successfully."
+            "jd_alignment_score": {"score": 0, "explanation": "No cover letter provided."},
+            "evidence_score": {"score": 0, "explanation": "No cover letter provided."},
+            "company_fit_score": {"score": 0, "explanation": "No cover letter provided."},
+            "structure_tone_score": {"score": 0, "explanation": "No cover letter provided."},
+            "final_ai_score": 0,
+            "ai_writing_score": 0
         }
+
+    # Build the evaluation prompt using the custom prompt generator
+    prompt = generate_cover_letter_analysis_prompt(
+        cover_letter=cover_letter,
+        job=job or {},
+        resume_text=resume_text
+    )
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Return only valid JSON. Do not include any prose or formatting."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+
+        output = response.choices[0].message.content.strip()
+
+        # Clean up accidental markdown
+        if output.startswith("```"):
+            output = output.strip("`")
+            if output.startswith("json"):
+                output = output[4:].strip()
+
+        gpt_data = json.loads(output)
+
+        # Fallback field for backward compatibility
+        gpt_data["ai_writing_score"] = gpt_data.get("final_ai_score", 0)
+
+        return gpt_data
+
     except Exception as e:
-        print("Error analyzing cover letter:", e)
+        print("Cover letter GPT analysis failed:", e)
         return {
-            "analysis": "Analysis failed due to error.",
-            "relevance": 0,
-            "originality": 0,
-            "tone_consistency": 0,
-            "clarity": 0,
-            "engagement": 0,
-            "ai_writing_score": 0,
-            "recommendation": "Unable to evaluate authenticity."
+            "jd_alignment_score": {"score": 0, "explanation": "Evaluation error."},
+            "evidence_score": {"score": 0, "explanation": "Evaluation error."},
+            "company_fit_score": {"score": 0, "explanation": "Evaluation error."},
+            "structure_tone_score": {"score": 0, "explanation": "Evaluation error."},
+            "final_ai_score": 0,
+            "ai_writing_score": 0
         }
 
 
@@ -887,6 +973,132 @@ def compute_resume_final_score(job: dict, candidate: dict) -> Tuple[float, Dict]
 
 #EVALUATE RESUME
 
+def evaluation_prompting(
+    job: dict,
+    candidate_name: str,
+    experience_years: float,
+    education_level: str,
+    skill_match_pct: float,
+    certifications: list,
+    final_technical: list,
+    final_soft: list,
+    links: dict,
+    quality_score: float,
+    cover_letter_analysis_dict: dict,
+    breakdown_text: str,
+    quality_breakdown: dict,
+    final_score: float,
+    score_breakdown: dict,
+    cover_letter: str = ""
+) -> str:
+    """
+    Generates GPT prompt for evaluating a resume. Returns strengths/weaknesses as JSON arrays (for frontend).
+    """
+
+    system_instructions = (
+        "You are a professional recruiter AI evaluating a candidate for a specific job role.\n"
+        "Return valid JSON only. No prose, no extra commentary.\n"
+        "Think step by step internally, but only provide the final JSON.\n"
+        "Focus exclusively on job expectations — no mention of generic traits like employment gaps unless explicitly related to job expectations.\n"
+    )
+
+    examples = """
+### Examples:
+- Example 1 (Excellent Fit):
+{
+    "summary": "Gunabalan Lingam has outstanding alignment with the job's technical and soft skills expectations, including repeated proven mentions of C# in both work experience and projects, making him an ideal candidate.",
+    "strengths": ["Proven C# skills in work and projects", "Exceeds expected certifications", "Exceeds soft skills expectations"],
+    "weaknesses": []
+}
+
+- Example 2 (Good Fit):
+{
+    "summary": "Gunabalan Lingam meets all essential technical and soft skills, with slightly above expected experience and clear evidence of certifications, making him a strong fit.",
+    "strengths": ["Good skill match percentage", "Above expected experience", "Relevant certifications"],
+    "weaknesses": []
+}
+
+- Example 3 (Moderate Fit):
+{
+    "summary": "Gunabalan Lingam demonstrates most required technical skills and experience, though missing some certifications and falling short in a few soft skill areas.",
+    "strengths": ["Strong technical skills alignment", "Good experience", "Some relevant soft skills"],
+    "weaknesses": ["Missing some required certifications", "Lacks a few expected soft skills"]
+}
+
+- Example 4 (Weak Fit):
+{
+    "summary": "Gunabalan Lingam lacks several of the job's key technical skills and has below the required experience.",
+    "strengths": ["Some soft skills alignment"],
+    "weaknesses": ["Missing key technical skills", "Below expected experience", "No relevant certifications"]
+}
+
+- Example 5 (Minimal Fit):
+{
+    "summary": "Gunabalan Lingam has very limited alignment with the job's technical and soft skills expectations, and does not meet the experience or certification requirements.",
+    "strengths": [],
+    "weaknesses": ["Missing all key technical skills", "No relevant certifications", "Significantly below experience requirement"]
+}
+"""
+
+    prompt = f"""
+{system_instructions}
+
+### Few-shot Examples:
+{examples}
+
+### Job Details:
+- Title: {job.get('job_title', 'Unknown')}
+- Description: {job.get('job_description', 'N/A')}
+- Expected Responsibilities: {job.get('expected_responsibilities', 'No specific responsibilities provided')}
+- Expected Technical Skills: {job.get('expected_technical_skills', [])}
+- Expected Soft Skills: {job.get('expected_soft_skills', [])}
+- Expected Certifications: {job.get('expected_certifications', [])}
+- Expected Education Level: {job.get('expected_education_level', 'No expectation')}
+- Expected Experience Range: {job.get('expected_experience_range', 'No expectation')}
+- Expected Languages: {job.get('expected_languages', [])}
+- Expected Tools: {job.get('expected_tools', [])}
+
+### Candidate Details:
+- Name: {candidate_name}
+- Experience Years: {experience_years}
+- Education Level: {education_level}
+- Skills Matched (%): {skill_match_pct}
+- Certifications: {certifications}
+- Technical Skills: {final_technical}
+- Soft Skills: {final_soft}
+- Portfolio URL: {links.get('portfolio_url', '')}
+- Languages: {links.get('languages', [])}
+- Resume Quality Score: {quality_score}
+- Cover Letter Analysis: {cover_letter_analysis_dict if cover_letter else 'No cover letter'}
+
+### Additional Data:
+- Skills Match Breakdown: {breakdown_text}
+- Resume Quality Breakdown: {quality_breakdown}
+- Final Numeric Score: {final_score}
+- Score Breakdown: {score_breakdown}
+
+### Evaluation Rules:
+- Start the summary with the candidate's name.
+- Make the summary longer and more technical — 1 to 2 sentences clearly stating why the candidate is or isn’t a good fit.
+- Highlight “proven” skills when repeated in multiple sections.
+- Provide strengths and weaknesses as **JSON arrays of strings** (not bullet string).
+- If there are no genuine strengths or weaknesses based on job expectations, use an empty array `[]`.
+- Do not mention generic gaps or traits unless relevant to job expectations.
+
+Return your evaluation in this exact JSON format:
+
+{{
+  "summary": "<A clear, technical summary>",
+  "strengths": ["<point1>", "<point2>", "..."],
+  "weaknesses": ["<point1>", "<point2>", "..."]
+}}
+
+Only return valid JSON.
+"""
+
+    return prompt.strip()
+
+
 def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "", pdf_path: str = None) -> Dict[str, Any]:
     from collections import defaultdict
 
@@ -932,7 +1144,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
 
     links = extract_links_from_resume(resume_text, pdf_path)
     quality_score, quality_breakdown = compute_resume_quality_score(resume_text, file_format="pdf")
-    cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
+    cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter, job)
     ai_score = cover_letter_analysis_dict.get("ai_writing_score", 0)
 
     expected_technical_skills = job.get("expected_technical_skills", [])
@@ -957,27 +1169,33 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
     }
     final_score, score_breakdown = compute_resume_final_score(job, candidate_data)
 
-    prompt = f"""
-You are a recruiter AI evaluating a resume and cover letter for qualitative insights. Return a JSON with:
-- A short summary of the candidate's suitability
-- Key strengths
-- Key weaknesses
-
-### Job Description:
-{job['job_description'].strip()}
-
-### Resume:
-{resume_text.strip()}
-"""
-    if cover_letter:
-        prompt += f"\n### Cover Letter:\n{cover_letter.strip()}"
+    # NEW: Get advanced prompt from evaluation_prompting function
+    prompt = evaluation_prompting(
+        job=job,
+        candidate_name=candidate_name,
+        experience_years=experience_years,
+        education_level=education_level,
+        skill_match_pct=skill_match_pct,
+        certifications=format_list(certifications_list).split(", "),
+        final_technical=final_technical,
+        final_soft=final_soft,
+        links=links,
+        quality_score=quality_score,
+        cover_letter_analysis_dict=cover_letter_analysis_dict,
+        breakdown_text=breakdown_text,
+        quality_breakdown=quality_breakdown,
+        final_score=final_score,
+        score_breakdown=score_breakdown,
+        cover_letter=cover_letter
+    )
 
     response = openai_client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": "Return valid JSON only. No prose or comments."},
             {"role": "user", "content": prompt}
-        ]
+        ],
+        temperature=0  # Consistency
     )
 
     raw_output = response.choices[0].message.content.strip()
@@ -988,8 +1206,9 @@ You are a recruiter AI evaluating a resume and cover letter for qualitative insi
 
     try:
         gpt_data = json.loads(raw_output)
-        gpt_data["strengths"] = gpt_data.get("strengths", "Not provided")
-        gpt_data["weaknesses"] = gpt_data.get("weaknesses", "Not provided")
+        gpt_data["strengths"] = gpt_data.get("strengths", [])
+        gpt_data["weaknesses"] = gpt_data.get("weaknesses", [])
+
         gpt_data["summary"] = gpt_data.get("summary", "Not provided")
 
         # Final data dictionary
@@ -1036,6 +1255,8 @@ You are a recruiter AI evaluating a resume and cover letter for qualitative insi
 
 
 
+#STORE TO POSTGRESQL DATABASE
+
 def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id, resume_source="form"):
     db_url = os.getenv("DATABASE_URL")
     up.uses_netloc.append("postgres")
@@ -1048,6 +1269,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     email = safe_val(parsed_data.get("email"))
     phone = safe_val(parsed_data.get("phone_number"))
 
+    # Get or create job ID
     cur.execute("SELECT id FROM jobs WHERE job_title = %s AND client_id = %s LIMIT 1;", (job_title, client_id))
     row = cur.fetchone()
     job_id = row[0] if row else None
@@ -1056,6 +1278,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
                      (job_title, "Placeholder description", client_id))
         job_id = cur.fetchone()[0]
 
+    # Normalize skill lists
     def normalize_skill_list(value):
         if isinstance(value, str):
             try:
@@ -1069,16 +1292,9 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     technical_skills_list = normalize_skill_list(gpt_result.get("technical_skills", []))
     soft_skills_list = normalize_skill_list(gpt_result.get("soft_skills", []))
 
-    strengths = (
-        json.dumps(gpt_result.get("strengths", "Not provided"))
-        if isinstance(gpt_result.get("strengths", "Not provided"), (dict, list))
-        else gpt_result.get("strengths", "Not provided")
-    )
-    weaknesses = (
-        json.dumps(gpt_result.get("weaknesses", "Not provided"))
-        if isinstance(gpt_result.get("weaknesses", "Not provided"), (dict, list))
-        else gpt_result.get("weaknesses", "Not provided")
-    )
+    # Convert strengths and weaknesses arrays to JSON strings if needed
+    strengths = json.dumps(gpt_result.get("strengths", [])) if isinstance(gpt_result.get("strengths"), (list, dict)) else str(gpt_result.get("strengths", ""))
+    weaknesses = json.dumps(gpt_result.get("weaknesses", [])) if isinstance(gpt_result.get("weaknesses"), (list, dict)) else str(gpt_result.get("weaknesses", ""))
 
     args = (
         job_id, name, email, phone, resume_url,
@@ -1089,7 +1305,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("resume_quality_breakdown", {})),
         json.dumps(gpt_result.get("cover_letter_analysis", {})),
         gpt_result.get("ai_writing_score", 0), gpt_result.get("skill_match_breakdown", ""),
-        json.dumps(gpt_result.get("score_breakdown", {})),  
+        json.dumps(gpt_result.get("score_breakdown", {})),
         datetime.utcnow()
     )
 
@@ -1125,7 +1341,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             cover_letter_analysis = EXCLUDED.cover_letter_analysis,
             ai_writing_score = EXCLUDED.ai_writing_score,
             skill_match_breakdown = EXCLUDED.skill_match_breakdown,
-            score_breakdown = EXCLUDED.score_breakdown,  
+            score_breakdown = EXCLUDED.score_breakdown,
             application_date = EXCLUDED.application_date;
     """, args)
 
@@ -1136,7 +1352,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
 
 
 
-
+#PROCESS RESUME
 
 def get_job_description_from_db(job_title):
     conn = psycopg2.connect(os.getenv("DATABASE_URL"))
