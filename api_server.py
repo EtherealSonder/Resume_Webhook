@@ -194,8 +194,8 @@ def get_candidates():
                    r.technical_skills, r.soft_skills,
                    r.portfolio_url, r.github_url, r.linkedin_url,
                    r.summary, r.strengths, r.weaknesses,
-                   r.resume_url, r.resume_quality_score,r.resume_quality_breakdown,
-                   r.skill_match_breakdown 
+                   r.resume_url, r.resume_quality_score, r.resume_quality_breakdown,
+                   r.skill_match_breakdown, r.score_breakdown  
             FROM resumes r
             JOIN jobs j ON r.job_id = j.id
             WHERE j.client_id = %s
@@ -234,7 +234,8 @@ def get_candidates():
                 "resume_url": row[20] or "",
                 "resume_quality_score": row[21] or 0,
                 "resume_quality_breakdown": row[22] or {},
-                "skill_match_breakdown": row[23] or ""  
+                "skill_match_breakdown": row[23] or "",
+                "score_breakdown": row[24] or {}  
             }
             for row in rows
         ]
@@ -243,6 +244,7 @@ def get_candidates():
     except Exception as e:
         logging.exception("Error fetching candidates")
         return jsonify({"error": str(e)}), 500
+
 
 
 

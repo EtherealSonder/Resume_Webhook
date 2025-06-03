@@ -23,7 +23,7 @@ import tldextract
 import socket
 from typing import Tuple, Dict
 import language_tool_python  # grammar/spell-check
-
+import textstat
 from copyleaks_client import check_ai_content, check_plagiarism
 
 
@@ -101,27 +101,29 @@ def calculate_experience_years(experiences: List[Any]) -> float:
 
     return round(total_months / 12, 1)
 
-def check_experience_match(expected_range: str, expected_level: str, candidate_years: float) -> bool:
+def check_experience_match(
+    expected_range: str,
+    expected_level: str,
+    candidate_years: float,
+    candidate_job_titles: List[str],
+    job_title: str
+) -> Tuple[bool, str, float]:
     """
-    Determine if the candidate's experience years meet or exceed the expected range or level.
-    If both expected_range and expected_level are 'No expectation on experience', return True.
+    Final, robust version:
+    - Retains numeric range/level mapping logic.
+    - Adds job title alignment scoring.
+    - Returns: (experience match bool, explanation, previous role alignment score)
     """
 
-    # If no expectations are set, always return True
-    if expected_range == "No expectation on experience" and expected_level == "No expectation on experience":
-        return True
-
-    # Helper to parse expected_range text to a numeric lower bound (e.g., '2+ years' -> 2)
+    # Helper to parse expected_range text to numeric lower bound (e.g., '2+ years' -> 2)
     def parse_range_to_min_years(text: str) -> float:
         match = re.search(r"(\d+(\.\d+)?)", text)
         if match:
             return float(match.group(1))
         return 0.0
 
-    # Convert expected_range to numeric min years
     expected_range_min_years = parse_range_to_min_years(expected_range or "")
 
-    # Mapping from experience_level to numeric ranges
     level_to_range = {
         "Fresher": (0, 0),
         "Beginner": (0, 1),
@@ -130,24 +132,34 @@ def check_experience_match(expected_range: str, expected_level: str, candidate_y
         "Experienced": (4, 7),
         "Advanced": (7, 10),
         "Expert": (10, 15),
-        "Veteran": (15, 100)  # 100 as an arbitrary upper limit
+        "Veteran": (15, 100)
     }
 
-    # Check against experience level
-    level_range = level_to_range.get(expected_level, (0, 100))  # default to 0–100 if unknown
+    level_range = level_to_range.get(expected_level, (0, 100))  # default if unknown
 
-    # Decision logic:
-    # If expected_range is not default, use it
+    # Initial explanation string
+    explanation = ""
+
+    # Decision logic: expected range has priority
     if expected_range != "No expectation on experience" and expected_range.strip():
-        return candidate_years >= expected_range_min_years
+        experience_match = candidate_years >= expected_range_min_years
+        explanation += f"Expected experience: {expected_range}. Candidate has {candidate_years} years. "
+    elif expected_level != "No expectation on experience" and expected_level.strip():
+        experience_match = level_range[0] <= candidate_years <= level_range[1]
+        explanation += f"Expected level: {expected_level} ({level_range[0]}-{level_range[1]} yrs). Candidate has {candidate_years} yrs. "
+    else:
+        experience_match = True
+        explanation += "No explicit experience expectation. "
 
-    # Else if expected_level is not default, check against level range
-    if expected_level != "No expectation on experience" and expected_level.strip():
-        return level_range[0] <= candidate_years <= level_range[1]
+    # Add job title alignment scoring
+    alignment_scores = []
+    for prev_title in candidate_job_titles:
+        score = fuzz.partial_ratio(prev_title.lower(), job_title.lower())
+        alignment_scores.append(score)
+    best_alignment = max(alignment_scores) if alignment_scores else 0
+    explanation += f"Best previous job title alignment: {best_alignment}%."
 
-    # If both expectations are somehow empty, fallback to True
-    return True
-
+    return experience_match, explanation, best_alignment
 
 
 
@@ -571,6 +583,17 @@ def check_readability(text: str) -> Tuple[float, str]:
     else:
         return 0.4, f"Found {error_count} significant grammar/spelling issues."
 
+def flesch_kincaid_readability(text: str) -> Tuple[float, str]:
+    """
+    Uses Flesch Reading Ease score to evaluate readability.
+    """
+    score = textstat.flesch_reading_ease(text)
+    if score >= 60:
+        return 1.0, f"Good readability (Flesch score: {round(score, 1)})."
+    elif score >= 30:
+        return 0.7, f"Average readability (Flesch score: {round(score, 1)})."
+    else:
+        return 0.4, f"Hard to read (Flesch score: {round(score, 1)})."
 
 
 def check_ats_format(file_format: str) -> Tuple[float, str]:
@@ -580,6 +603,17 @@ def check_ats_format(file_format: str) -> Tuple[float, str]:
 
 
 def compute_resume_quality_score(text: str, file_format: str = "pdf") -> Tuple[int, Dict]:
+    """
+    Computes a 100-point resume quality score using multiple heuristics:
+    - word count
+    - section headers
+    - bullet points
+    - contact info
+    - formatting
+    - consistency
+    - readability (grammar + Flesch)
+    - ATS compatibility
+    """
     weights = {
         "structure": 0.2,
         "section_headers": 0.05,
@@ -588,35 +622,40 @@ def compute_resume_quality_score(text: str, file_format: str = "pdf") -> Tuple[i
         "contact_info": 0.1,
         "formatting": 0.1,
         "consistency": 0.1,
-        "readability": 0.15,
+        "readability_grammar": 0.1,
+        "readability_flesch": 0.05,
         "ats_compatibility": 0.1
     }
 
-    # Evaluate all modules
     breakdown = {}
-    modules = {
-        "structure": check_structure,
-        "section_headers": check_section_headers,
-        "word_count": check_word_count,
-        "bullet_points": check_bullet_points,
-        "contact_info": check_contact_info,
-        "formatting": check_formatting,
-        "consistency": check_consistency,
-        "readability": check_readability,
-        "ats_compatibility": lambda text: check_ats_format(file_format)
-    }
 
-    for key, func in modules.items():
-        if key == "ats_compatibility":
-            score, explanation = func(file_format)
-        else:
-            score, explanation = func(text)
-        breakdown[key] = {"score": score, "explanation": explanation}
+    structure_score, structure_exp = check_structure(text)
+    section_score, section_exp = check_section_headers(text)
+    word_score, word_exp = check_word_count(text)
+    bullet_score, bullet_exp = check_bullet_points(text)
+    contact_score, contact_exp = check_contact_info(text)
+    formatting_score, formatting_exp = check_formatting(text)
+    consistency_score, consistency_exp = check_consistency(text)
+    grammar_score, grammar_exp = check_readability(text)
+    flesch_score, flesch_exp = flesch_kincaid_readability(text)
+    ats_score, ats_exp = check_ats_format(file_format)
 
-    # Compute weighted final score
+    breakdown["structure"] = {"score": structure_score, "explanation": structure_exp}
+    breakdown["section_headers"] = {"score": section_score, "explanation": section_exp}
+    breakdown["word_count"] = {"score": word_score, "explanation": word_exp}
+    breakdown["bullet_points"] = {"score": bullet_score, "explanation": bullet_exp}
+    breakdown["contact_info"] = {"score": contact_score, "explanation": contact_exp}
+    breakdown["formatting"] = {"score": formatting_score, "explanation": formatting_exp}
+    breakdown["consistency"] = {"score": consistency_score, "explanation": consistency_exp}
+    breakdown["readability_grammar"] = {"score": grammar_score, "explanation": grammar_exp}
+    breakdown["readability_flesch"] = {"score": flesch_score, "explanation": flesch_exp}
+    breakdown["ats_compatibility"] = {"score": ats_score, "explanation": ats_exp}
+
+    # Final weighted sum (no division by 100!)
     final_score = sum(breakdown[k]["score"] * weights[k] for k in weights)
-    return round(final_score * 100, 2), breakdown
+    final_score = round(final_score * 100, 2)  # Scale to 0–100 range
 
+    return final_score, breakdown
 
 
 
@@ -710,13 +749,148 @@ def format_list(items: List[Any]) -> str:
 
 
 
+def check_portfolio_match(expected_portfolio: str, extracted_portfolio: str) -> Tuple[bool, str]:
+    """
+    Returns boolean match and explanation.
+    """
+    if not expected_portfolio:
+        return True, "No portfolio requirement specified by job."
+    if extracted_portfolio and expected_portfolio.lower() in extracted_portfolio.lower():
+        return True, f"Portfolio link matches expected portfolio: {extracted_portfolio}"
+    return False, "No matching portfolio link found."
+
+
+def check_certifications_match(expected_certs: list, candidate_certs: list) -> Tuple[float, str]:
+    if not expected_certs:
+        return 100.0, "No certifications required for this job."
+    matched_scores = []
+    for exp_cert in expected_certs:
+        for cand_cert in candidate_certs:
+            score = fuzz.partial_ratio(exp_cert.lower(), cand_cert.lower())
+            if score >= 70:  # Accept partial matches above 70
+                matched_scores.append(exp_cert)
+                break
+    percentage = (len(matched_scores) / len(expected_certs)) * 100
+    explanation = f"Matched certifications: {matched_scores}" if matched_scores else "No relevant certifications found."
+    return percentage, explanation
+
+def check_soft_skills_match(expected_skills: list, candidate_skills: list) -> Tuple[float, str]:
+    if not expected_skills:
+        return 100.0, "No soft skills required for this job."
+    matched_scores = []
+    for exp_skill in expected_skills:
+        for cand_skill in candidate_skills:
+            score = fuzz.partial_ratio(exp_skill.lower(), cand_skill.lower())
+            if score >= 70:
+                matched_scores.append(exp_skill)
+                break
+    percentage = (len(matched_scores) / len(expected_skills)) * 100
+    explanation = f"Matched soft skills: {matched_scores}" if matched_scores else "No relevant soft skills found."
+    return percentage, explanation
+
+
+def check_language_match(expected_language: str, candidate_languages: list) -> Tuple[bool, str]:
+    """
+    Check if candidate language matches expected language (if any).
+    """
+    if not expected_language:
+        return True, "No language requirement specified."
+    for lang in candidate_languages:
+        if expected_language.lower() in lang.lower():
+            return True, f"Matched expected language: {expected_language}"
+    return False, f"Expected language ({expected_language}) not found in candidate languages."
+
+def compute_resume_final_score(job: dict, candidate: dict) -> Tuple[float, Dict]:
+    weights = {
+        "skill_match": 0.35,  # slightly increased
+        "education_match": 0.1,
+        "experience_match": 0.15,
+        "portfolio_match": 0.05,
+        "certifications_match": 0.1,
+        "soft_skills_match": 0.05,  # reduced weight
+        "language_match": 0.05,
+        "previous_role_alignment": 0.15  # reduced weight a bit
+    }
+
+    breakdown = {}
+
+    skill_match_pct = candidate.get("skills_matched_pct", 0)
+    breakdown["skill_match"] = {
+        "score": skill_match_pct,
+        "explanation": f"Skills match {skill_match_pct}%, based on job and candidate's listed skills."
+    }
+
+    education_match = candidate.get("education_level_match", False)
+    breakdown["education_match"] = {
+        "score": 100 if education_match else 0,
+        "explanation": "Education meets job requirement." if education_match else "Education below job requirement."
+    }
+
+    exp_match_bool, exp_expl, role_alignment_score = check_experience_match(
+        job.get("expected_experience_range", "No expectation on experience"),
+        job.get("experience_level", "No expectation on experience"),
+        candidate.get("experience_years", 0),
+        candidate.get("previous_job_titles", []),
+        job.get("job_title", "")
+    )
+    breakdown["experience_match"] = {
+        "score": 100 if exp_match_bool else 0,
+        "explanation": exp_expl.replace("Best previous job title alignment:", "We also looked at similar roles and found an alignment of")
+    }
+    breakdown["previous_role_alignment"] = {
+        "score": role_alignment_score,
+        "explanation": f"We also looked at similar roles and found an alignment of {role_alignment_score}%."
+    }
+
+    portfolio_match, portfolio_expl = check_portfolio_match(
+        job.get("expected_portfolio", ""),
+        candidate.get("portfolio_url", "")
+    )
+    breakdown["portfolio_match"] = {
+        "score": 100 if portfolio_match else 0,
+        "explanation": portfolio_expl
+    }
+
+    certs_match_pct, certs_expl = check_certifications_match(
+        job.get("expected_certifications", []),
+        candidate.get("certifications", [])
+    )
+    breakdown["certifications_match"] = {
+        "score": certs_match_pct,
+        "explanation": certs_expl
+    }
+
+    soft_skills_match_pct, soft_skills_expl = check_soft_skills_match(
+        job.get("expected_soft_skills", []),
+        candidate.get("soft_skills", [])
+    )
+    breakdown["soft_skills_match"] = {
+        "score": soft_skills_match_pct,
+        "explanation": soft_skills_expl
+    }
+
+    language_match, language_expl = check_language_match(
+        job.get("expected_language", ""),
+        candidate.get("languages", [])
+    )
+    breakdown["language_match"] = {
+        "score": 100 if language_match else 0,
+        "explanation": language_expl
+    }
+
+    final_score = sum(breakdown[k]["score"] * weights[k] for k in weights)
+    final_score = round(final_score / 100, 2) * 100
+
+    return final_score, breakdown
+
+
+
 #EVALUATE RESUME
 
 def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "", pdf_path: str = None) -> Dict[str, Any]:
     from collections import defaultdict
 
     technical_skills_field = resume_data.get("technical_skills")
-    soft_skills_field = resume_data.get("soft_skills")
     certifications = resume_data.get("certifications")
     education_raw = resume_data.get("education", "")
     experience_field = resume_data.get("professional_experience", None)
@@ -739,49 +913,28 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
                 except:
                     raw_technical_skills.append(val)
 
-    # Resume full text for scanning
     resume_text = '\n'.join([f"{k}: {get_value(v)}" for k, v in resume_data.items()])
-
-    # Extract technical & soft skills from entire text
     extracted_section_skills = extract_technical_skills(resume_text)
     extracted_soft_skills = extract_soft_skills(resume_text, cover_letter)
     inferred_from_body = detect_technical_skills_from_text(resume_text)
-
-    # Combine with fallback
     final_technical = sorted(set(extracted_section_skills + inferred_from_body + raw_technical_skills))
     final_soft = sorted(set(extracted_soft_skills))
 
-    # Process other fields
     certifications_list = certifications.values if certifications else []
     experience_entries = experience_field.values if experience_field and hasattr(experience_field, "values") else []
     experience_years = calculate_experience_years(experience_entries)
-    expected_experience_range = job.get("expected_experience_range", "No expectation on experience")
-    expected_experience_level = job.get("experience_level", "No expectation on experience")
-
-    # Call the new function to get the boolean
-    experience_level_match = check_experience_match(expected_experience_range, expected_experience_level, experience_years)
-    print("Experience level match (bool):", experience_level_match)
 
     education_level = extract_education_level(get_value(education_raw), resume_text)
+    expected_experience_range = job.get("expected_experience_range", "No expectation on experience")
+    expected_experience_level = job.get("experience_level", "No expectation on experience")
     expected_education_level = job.get("expected_education_level", "No expectation on education level")
-
-    # Use the new function
     education_level_match = check_education_level_match(expected_education_level, education_level)
-    print("Education level match (bool):", education_level_match)
- 
-    
 
-    links = extract_links_from_resume(resume_text, job.get("resume_pdf_path", None))
-    
-    print("Final links dictionary:", links)
-    
+    links = extract_links_from_resume(resume_text, pdf_path)
     quality_score, quality_breakdown = compute_resume_quality_score(resume_text, file_format="pdf")
-
-
     cover_letter_analysis_dict = analyze_cover_letter_authenticity(resume_text, cover_letter)
     ai_score = cover_letter_analysis_dict.get("ai_writing_score", 0)
 
-    # Compute technical skill match and breakdown text
     expected_technical_skills = job.get("expected_technical_skills", [])
     candidate_name = get_value(resume_data.get("full_name", "unknown"))
     job_id = job.get("id")
@@ -792,23 +945,23 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
         job_id
     )
 
-    # GPT evaluation prompt
+    candidate_data = {
+        "skills_matched_pct": skill_match_pct,
+        "education_level_match": education_level_match,
+        "experience_years": experience_years,
+        "previous_job_titles": [get_value(exp.job_title) for exp in experience_entries if hasattr(exp, "job_title")],
+        "portfolio_url": links.get("portfolio_url", ""),
+        "certifications": format_list(certifications_list).split(", "),
+        "soft_skills": final_soft,
+        "languages": [get_value(resume_data.get("languages", ""))]
+    }
+    final_score, score_breakdown = compute_resume_final_score(job, candidate_data)
+
     prompt = f"""
-You are an advanced technical recruiter AI.
-
-Your task is to evaluate a resume and cover letter against a job description, and return a JSON with:
-- A numerical score from 0 to 100 using the rubric below
-- A short summary explaining *why* the candidate is a good fit
-- Key strengths (if any)
-- Weaknesses (if any)
-
-SCORING RUBRIC:
-- Resume Quality: {quality_score}/100 (20%)
-- Years of Experience: {experience_years} (20%)
-- Skill Match: {skill_match_pct}% (25%)
-- Education Level: {education_level} (15%)
-- Soft Skills: (10%)
-- Certifications: (10%)
+You are a recruiter AI evaluating a resume and cover letter for qualitative insights. Return a JSON with:
+- A short summary of the candidate's suitability
+- Key strengths
+- Key weaknesses
 
 ### Job Description:
 {job['job_description'].strip()}
@@ -828,9 +981,6 @@ SCORING RUBRIC:
     )
 
     raw_output = response.choices[0].message.content.strip()
-    print("Raw GPT output:", repr(raw_output))  # Debug!
-
-    # Remove Markdown fences if present
     if raw_output.startswith("```"):
         raw_output = raw_output.strip("`")
         if raw_output.startswith("json"):
@@ -838,20 +988,14 @@ SCORING RUBRIC:
 
     try:
         gpt_data = json.loads(raw_output)
+        gpt_data["strengths"] = gpt_data.get("strengths", "Not provided")
+        gpt_data["weaknesses"] = gpt_data.get("weaknesses", "Not provided")
+        gpt_data["summary"] = gpt_data.get("summary", "Not provided")
 
-        # Fallbacks for missing strengths and weaknesses
-        gpt_data["strengths"] = gpt_data.get("strengths") or "Not provided"
-        gpt_data["weaknesses"] = gpt_data.get("weaknesses") or "Not provided"
-
-        for key in [
-            "score", "summary", "strengths", "weaknesses",
-            "experience_years", "education_level", "skills_matched_pct", "resume_quality_score",
-            "cover_letter_report", "portfolio_url", "github_url", "linkedin_url",
-            "technical_skills", "soft_skills", "certifications"
-        ]:
-            gpt_data.setdefault(key, "" if isinstance(gpt_data.get(key), str) else 0)
-
+        # Final data dictionary
         gpt_data.update({
+            "score": final_score,
+            "score_breakdown": score_breakdown,
             "experience_years": experience_years,
             "education_level": education_level,
             "skills_matched_pct": skill_match_pct,
@@ -862,7 +1006,7 @@ SCORING RUBRIC:
             "soft_skills": final_soft,
             "resume_quality_score": quality_score,
             "resume_quality_breakdown": quality_breakdown,
-            "skill_match_breakdown": breakdown_text,  # now storing text directly
+            "skill_match_breakdown": breakdown_text,
             **links
         })
 
@@ -870,24 +1014,24 @@ SCORING RUBRIC:
 
     except Exception as e:
         print("Failed to parse GPT output:", e)
-        print("Raw output after cleanup:", raw_output)
         return {
-            "score": 0,
-            "summary": "Evaluation error.",
+            "score": final_score,
+            "score_breakdown": score_breakdown,
+            "summary": "Qualitative evaluation error.",
             "strengths": "Not provided",
             "weaknesses": "Not provided",
-            "experience_years": 0,
-            "education_level": "",
-            "skills_matched_pct": 0,
-            "certifications": "",
-            "technical_skills": [],
-            "soft_skills": [],
-            "resume_quality_score": 0,
+            "experience_years": experience_years,
+            "education_level": education_level,
+            "skills_matched_pct": skill_match_pct,
+            "certifications": format_list(certifications_list),
+            "technical_skills": final_technical,
+            "soft_skills": final_soft,
+            "resume_quality_score": quality_score,
             "resume_quality_breakdown": quality_breakdown,
-            "portfolio_url": "",
-            "github_url": "",
-            "linkedin_url": "",
-            "skill_match_breakdown": "" 
+            "portfolio_url": links.get("portfolio_url", ""),
+            "github_url": links.get("github_url", ""),
+            "linkedin_url": links.get("linkedin_url", ""),
+            "skill_match_breakdown": breakdown_text
         }
 
 
@@ -898,7 +1042,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
 
-    def safe_val(x): return x.value if hasattr(x, 'value') else x or ""
+    def safe_val(x): return x.value if hasattr(x, "value") else x or ""
 
     name = safe_val(parsed_data.get("full_name"))
     email = safe_val(parsed_data.get("email"))
@@ -942,9 +1086,10 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         gpt_result.get("experience_years", 0), gpt_result.get("education_level", ""), gpt_result.get("skills_matched_pct", 0),
         gpt_result.get("certifications", ""), resume_source, gpt_result.get("portfolio_url", ""), gpt_result.get("github_url", ""),
         gpt_result.get("linkedin_url", ""), technical_skills_list, soft_skills_list,
-        gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("resume_quality_breakdown", {})), 
+        gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("resume_quality_breakdown", {})),
         json.dumps(gpt_result.get("cover_letter_analysis", {})),
         gpt_result.get("ai_writing_score", 0), gpt_result.get("skill_match_breakdown", ""),
+        json.dumps(gpt_result.get("score_breakdown", {})),  
         datetime.utcnow()
     )
 
@@ -954,10 +1099,10 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             experience_years, education_level, skills_matched_pct, certifications, resume_source,
             portfolio_url, github_url, linkedin_url, technical_skills, soft_skills,
             resume_quality_score, resume_quality_breakdown, cover_letter_analysis,
-            ai_writing_score, skill_match_breakdown, application_date
+            ai_writing_score, skill_match_breakdown, score_breakdown, application_date
         )
         VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (email, job_id) DO UPDATE
         SET phone = EXCLUDED.phone,
@@ -980,6 +1125,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
             cover_letter_analysis = EXCLUDED.cover_letter_analysis,
             ai_writing_score = EXCLUDED.ai_writing_score,
             skill_match_breakdown = EXCLUDED.skill_match_breakdown,
+            score_breakdown = EXCLUDED.score_breakdown,  
             application_date = EXCLUDED.application_date;
     """, args)
 
