@@ -269,11 +269,8 @@ def normalize(text: str) -> str:
 
 def compute_skill_match(resume_technical_skills, job_expected_technical_skills, candidate_name, job_id):
     """
-    Compute % skill match between resume and job expectations using advanced fuzzy matching and spaCy similarity.
-    Return match % and breakdown text (as a string, not a file path).
+    Compute % skill match and structured breakdown.
     """
-
-    # Lowercase for normalization
     resume_skills_lower = [skill.lower() for skill in resume_technical_skills]
     job_skills_lower = [skill.lower() for skill in job_expected_technical_skills]
 
@@ -282,55 +279,35 @@ def compute_skill_match(resume_technical_skills, job_expected_technical_skills, 
 
     for job_skill in job_skills_lower:
         matched = False
-
-        #  Fuzzy match (RapidFuzz partial_ratio)
         for resume_skill in resume_skills_lower:
             fuzzy_score = fuzz.partial_ratio(job_skill, resume_skill)
-            if fuzzy_score > 80:  # threshold for “good enough” match
+            if fuzzy_score > 80:
                 matched_skills.append(job_skill)
                 matched = True
                 break
-
-        #  If no fuzzy match, fallback to spaCy similarity (optional)
         if not matched:
             job_doc = nlp(job_skill)
             for resume_skill in resume_skills_lower:
                 resume_doc = nlp(resume_skill)
-                similarity = job_doc.similarity(resume_doc)
-                if similarity > 0.8:  # threshold for semantic similarity
+                if job_doc.similarity(resume_doc) > 0.8:
                     matched_skills.append(job_skill)
                     matched = True
                     break
-
         if not matched:
             missing_skills.append(job_skill)
 
-    # Remove duplicates
     matched_skills = list(set(matched_skills))
-
-    # Compute match %
     match_pct = (len(matched_skills) / len(job_skills_lower)) * 100 if job_skills_lower else 0.0
 
-    # Create breakdown
-    breakdown_text = f"""
-Skill Match Breakdown for {candidate_name} (Job ID: {job_id})
+    breakdown = {
+        "expected_skills": job_expected_technical_skills,
+        "candidate_skills": resume_technical_skills,
+        "matched_skills": matched_skills,
+        "missing_skills": missing_skills,
+        "match_pct": round(match_pct, 2)
+    }
 
-Expected Technical Skills ({len(job_skills_lower)}):
-{', '.join(job_expected_technical_skills)}
-
-Candidate Technical Skills ({len(resume_skills_lower)}):
-{', '.join(resume_technical_skills)}
-
-Matched Skills ({len(matched_skills)}):
-{', '.join(matched_skills)}
-
-Missing Skills ({len(missing_skills)}):
-{', '.join(missing_skills)}
-
-Skill Match Percentage: {match_pct:.2f}%
-""".strip()
-
-    return match_pct, breakdown_text
+    return match_pct, breakdown
 
 
 
@@ -1150,7 +1127,9 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
     expected_technical_skills = job.get("expected_technical_skills", [])
     candidate_name = get_value(resume_data.get("full_name", "unknown"))
     job_id = job.get("id")
-    skill_match_pct, breakdown_text = compute_skill_match(
+    
+    # CHANGED: get structured breakdown instead of plain text
+    skill_match_pct, structured_breakdown = compute_skill_match(
         final_technical,
         expected_technical_skills,
         candidate_name,
@@ -1169,7 +1148,9 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
     }
     final_score, score_breakdown = compute_resume_final_score(job, candidate_data)
 
-    # NEW: Get advanced prompt from evaluation_prompting function
+    # Use structured breakdown for prompting but also stringify for GPT context
+    breakdown_text = json.dumps(structured_breakdown, indent=2)
+
     prompt = evaluation_prompting(
         job=job,
         candidate_name=candidate_name,
@@ -1195,7 +1176,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
             {"role": "system", "content": "Return valid JSON only. No prose or comments."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0  # Consistency
+        temperature=0
     )
 
     raw_output = response.choices[0].message.content.strip()
@@ -1208,10 +1189,8 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
         gpt_data = json.loads(raw_output)
         gpt_data["strengths"] = gpt_data.get("strengths", [])
         gpt_data["weaknesses"] = gpt_data.get("weaknesses", [])
-
         gpt_data["summary"] = gpt_data.get("summary", "Not provided")
 
-        # Final data dictionary
         gpt_data.update({
             "score": final_score,
             "score_breakdown": score_breakdown,
@@ -1225,7 +1204,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
             "soft_skills": final_soft,
             "resume_quality_score": quality_score,
             "resume_quality_breakdown": quality_breakdown,
-            "skill_match_breakdown": breakdown_text,
+            "skill_match_breakdown": structured_breakdown,
             **links
         })
 
@@ -1250,7 +1229,7 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
             "portfolio_url": links.get("portfolio_url", ""),
             "github_url": links.get("github_url", ""),
             "linkedin_url": links.get("linkedin_url", ""),
-            "skill_match_breakdown": breakdown_text
+            "skill_match_breakdown": structured_breakdown
         }
 
 
@@ -1304,7 +1283,7 @@ def save_to_postgresql(parsed_data, gpt_result, job_title, resume_url, client_id
         gpt_result.get("linkedin_url", ""), technical_skills_list, soft_skills_list,
         gpt_result.get("resume_quality_score", 0), json.dumps(gpt_result.get("resume_quality_breakdown", {})),
         json.dumps(gpt_result.get("cover_letter_analysis", {})),
-        gpt_result.get("ai_writing_score", 0), gpt_result.get("skill_match_breakdown", ""),
+        gpt_result.get("ai_writing_score", 0), json.dumps(gpt_result.get("skill_match_breakdown", {})),
         json.dumps(gpt_result.get("score_breakdown", {})),
         datetime.utcnow()
     )
