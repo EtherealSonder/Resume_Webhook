@@ -570,34 +570,47 @@ def check_structure(text: str) -> Tuple[float, str]:
 
 
 def check_section_headers(text: str) -> Tuple[float, str]:
+    headers = []
+    header_keywords = ["experience", "education", "skills", "projects", "summary", "contact", "certifications"]
     lines = text.splitlines()
-    header_lines = [line for line in lines if line.strip().isupper() or line.endswith(":")]
-    score = min(len(header_lines) / 6, 1.0)
-    explanation = f"Detected {len(header_lines)} header-like lines."
-    return score, explanation
+
+    for line in lines:
+        clean_line = line.strip().lower().rstrip(":")
+        if clean_line in header_keywords or line.strip().isupper() or line.strip().endswith(":"):
+            headers.append(line.strip())
+
+    score = min(len(headers) / 6, 1.0)
+    return score, f"Detected {len(headers)} header-like lines: {headers[:5]}{'...' if len(headers) > 5 else ''}"
 
 
 def check_word_count(text: str) -> Tuple[float, str]:
-    word_count = len(text.split())
-    if 300 <= word_count <= 600:
-        return 1.0, f"Word count is {word_count}, ideal range."
-    elif 150 < word_count < 300 or 600 < word_count <= 1000:
-        return 0.7, f"Word count is {word_count}, acceptable but could improve."
+    words = re.findall(r"\b\w+\b", text)
+    word_count = len(words)
+
+    if 150 <= word_count <= 350:
+        return 1.0, f"Word count is {word_count}, optimal range (150–350) for a concise resume."
+    elif 100 <= word_count < 150 or 350 < word_count <= 500:
+        return 0.7, f"Word count is {word_count}, slightly outside ideal range. Consider trimming or elaborating."
     else:
-        return 0.3, f"Word count is {word_count}, outside recommended range."
+        return 0.4, f"Word count is {word_count}, outside expected range. May affect clarity or ATS parsing."
+
 
 
 def check_bullet_points(text: str) -> Tuple[float, str]:
-    # Count various bullet styles
-    bullet_points = text.count("- ") + text.count("•") + text.count("–")
-    if bullet_points >= 10:
+    bullet_symbols = r"[-•●▪‣*→➤◉⦿‣‣●•■▶➔‣∙‣⦾•★]"
+    bullets = re.findall(rf"^\s*{bullet_symbols}", text, re.MULTILINE)
+    bullet_count = len(bullets)
+
+    if bullet_count >= 10:
         score = 1.0
-    elif bullet_points >= 5:
+    elif bullet_count >= 5:
         score = 0.7
+    elif bullet_count >= 2:
+        score = 0.5
     else:
         score = 0.3
-    explanation = f"Found {bullet_points} bullet points."
-    return score, explanation
+
+    return score, f"Detected {bullet_count} bullet points using standard or common Unicode symbols."
 
 
 
@@ -622,16 +635,72 @@ def check_contact_info(text: str) -> Tuple[float, str]:
 
 def check_formatting(text: str) -> Tuple[float, str]:
     lines = text.splitlines()
-    has_spacing = any(line.strip() == "" for line in lines)
-    if has_spacing:
-        return 1.0, "Good line spacing detected."
-    return 0.5, "Minimal spacing detected."
+    empty_lines = sum(1 for line in lines if line.strip() == "")
+    long_lines = sum(1 for line in lines if len(line.strip()) > 120)
+
+    if empty_lines >= 3 and long_lines <= 10:
+        return 1.0, f"Good formatting: {empty_lines} line breaks found, and only {long_lines} very long lines detected."
+    elif empty_lines >= 2:
+        return 0.7, f"Moderate formatting: {empty_lines} breaks, {long_lines} long lines. Could improve spacing."
+    else:
+        return 0.4, f"Poor formatting: Only {empty_lines} blank lines and {long_lines} long lines. Resume may look dense."
+
+
+PAST_TENSE_VERBS = {
+    "managed", "led", "developed", "created", "implemented", "designed", "built", "organized",
+    "analyzed", "engineered", "executed", "presented", "oversaw", "wrote", "launched", "conducted",
+    "coordinated", "delivered", "debugged", "mentored", "supervised", "reviewed", "streamlined",
+    "resolved", "translated", "integrated", "advised", "drafted", "initiated", "monitored"
+}
+
+PRESENT_TENSE_VERBS = {
+    "manage", "lead", "develop", "create", "implement", "design", "build", "organize",
+    "analyze", "engineer", "execute", "present", "oversee", "write", "launch", "conduct",
+    "coordinate", "deliver", "debug", "mentor", "supervise", "review", "streamline",
+    "resolve", "translate", "integrate", "advise", "draft", "initiate", "monitor"
+}
 
 
 def check_consistency(text: str) -> Tuple[float, str]:
-    if re.search(r"present|current", text.lower()):
-        return 1.0, "Consistent tense usage detected."
-    return 0.7, "Could improve consistency of tense."
+    doc = nlp(text)
+
+    past_matches = []
+    present_matches = []
+
+    for token in doc:
+        if token.pos_ == "VERB":
+            lemma = token.lemma_.lower()
+            verb = token.text.lower()
+            if lemma in PAST_TENSE_VERBS or verb in PAST_TENSE_VERBS:
+                past_matches.append(token.text)
+            elif lemma in PRESENT_TENSE_VERBS or verb in PRESENT_TENSE_VERBS:
+                present_matches.append(token.text)
+
+    past_count = len(past_matches)
+    present_count = len(present_matches)
+    total = past_count + present_count
+
+    if total == 0:
+        score = 0.6
+        explanation = "Could not detect enough action verbs to evaluate consistency. May be due to short length or formatting."
+    else:
+        imbalance = abs(past_count - present_count) / total
+        if imbalance < 0.2:
+            score = 1.0
+            explanation = f"Tense usage is consistent. Past: {past_count}, Present: {present_count}."
+        elif imbalance < 0.5:
+            score = 0.7
+            explanation = f"Moderate inconsistency in verb tense. Past: {past_count}, Present: {present_count}."
+        else:
+            score = 0.4
+            explanation = f"High tense inconsistency. Past: {past_count}, Present: {present_count}."
+
+    if past_matches:
+        explanation += f" Sample past verbs: {', '.join(past_matches[:5])}."
+    if present_matches:
+        explanation += f" Sample present verbs: {', '.join(present_matches[:5])}."
+
+    return score, explanation
 
 
 
@@ -639,25 +708,49 @@ def check_readability(text: str) -> Tuple[float, str]:
     tool = language_tool_python.LanguageTool('en-US')
     matches = tool.check(text)
     error_count = len(matches)
+
+    # Score calculation
     if error_count <= 5:
-        return 1.0, f"Found {error_count} minor grammar/spelling errors."
+        score = 1.0
     elif error_count <= 15:
-        return 0.7, f"Found {error_count} grammar/spelling errors."
+        score = 0.7
     else:
-        return 0.4, f"Found {error_count} significant grammar/spelling issues."
+        score = 0.4
 
-def flesch_kincaid_readability(text: str) -> Tuple[float, str]:
-    """
-    Uses Flesch Reading Ease score to evaluate readability.
-    """
-    score = textstat.flesch_reading_ease(text)
-    if score >= 60:
-        return 1.0, f"Good readability (Flesch score: {round(score, 1)})."
-    elif score >= 30:
-        return 0.7, f"Average readability (Flesch score: {round(score, 1)})."
+    # Prepare readable examples
+    detailed_examples = []
+    for match in matches[:5]:
+        context_text = match.context
+        error_offset = match.offset
+        error_length = match.errorLength
+        error_snippet = context_text[max(0, error_offset - 10): error_offset + error_length + 10].strip()
+        suggestion = match.message
+        detailed_examples.append(f"'{error_snippet}' – {suggestion}")
+
+    explanation = f"Detected {error_count} grammar/spelling issues."
+    if detailed_examples:
+        explanation += " Notable examples: " + "; ".join(detailed_examples)
+
+    return score, explanation
+
+def check_readability_flesch(text: str) -> Tuple[float, str]:
+    flesch_score = textstat.flesch_reading_ease(text)
+
+    # Resume-normalized interpretation
+    if flesch_score >= 60:
+        score = 1.0
+        explanation = f"Very easy to read (Flesch score: {flesch_score:.1f}). Clear structure and phrasing."
+    elif flesch_score >= 40:
+        score = 0.8
+        explanation = f"Readable (Flesch score: {flesch_score:.1f}). May contain some technical phrasing."
+    elif flesch_score >= 20:
+        score = 0.6
+        explanation = f"Dense (Flesch score: {flesch_score:.1f}). Resume may use compact or technical phrases."
     else:
-        return 0.4, f"Hard to read (Flesch score: {round(score, 1)})."
+        score = 0.4
+        explanation = f"Very dense (Flesch score: {flesch_score:.1f}). Could benefit from simpler sentence flow."
 
+    return score, explanation
 
 def check_ats_format(file_format: str) -> Tuple[float, str]:
     if file_format.lower() in ["pdf", "docx"]:
@@ -665,60 +758,58 @@ def check_ats_format(file_format: str) -> Tuple[float, str]:
     return 0.5, f"File format {file_format} may not be ATS-friendly."
 
 
-def compute_resume_quality_score(text: str, file_format: str = "pdf") -> Tuple[int, Dict]:
-    """
-    Computes a 100-point resume quality score using multiple heuristics:
-    - word count
-    - section headers
-    - bullet points
-    - contact info
-    - formatting
-    - consistency
-    - readability (grammar + Flesch)
-    - ATS compatibility
-    """
-    weights = {
-        "structure": 0.2,
-        "section_headers": 0.05,
-        "word_count": 0.1,
-        "bullet_points": 0.1,
-        "contact_info": 0.1,
-        "formatting": 0.1,
-        "consistency": 0.1,
-        "readability_grammar": 0.1,
-        "readability_flesch": 0.05,
-        "ats_compatibility": 0.1
-    }
-
+def compute_resume_quality_score(resume_text: str, file_format: str = "pdf") -> Tuple[float, Dict[str, Dict]]:
     breakdown = {}
 
-    structure_score, structure_exp = check_structure(text)
-    section_score, section_exp = check_section_headers(text)
-    word_score, word_exp = check_word_count(text)
-    bullet_score, bullet_exp = check_bullet_points(text)
-    contact_score, contact_exp = check_contact_info(text)
-    formatting_score, formatting_exp = check_formatting(text)
-    consistency_score, consistency_exp = check_consistency(text)
-    grammar_score, grammar_exp = check_readability(text)
-    flesch_score, flesch_exp = flesch_kincaid_readability(text)
-    ats_score, ats_exp = check_ats_format(file_format)
+    # Run all quality check functions
+    structure_score, structure_expl = check_structure(resume_text)
+    formatting_score, formatting_expl = check_formatting(resume_text)
+    word_count_score, word_count_expl = check_word_count(resume_text)
+    consistency_score, consistency_expl = check_consistency(resume_text)
+    contact_score, contact_expl = check_contact_info(resume_text)
+    bullet_score, bullet_expl = check_bullet_points(resume_text)
+    header_score, header_expl = check_section_headers(resume_text)
+    ats_score, ats_expl = check_ats_format(file_format)
+    flesch_score, flesch_expl = check_readability_flesch(resume_text)
+    grammar_score, grammar_expl = check_readability(resume_text)
 
-    breakdown["structure"] = {"score": structure_score, "explanation": structure_exp}
-    breakdown["section_headers"] = {"score": section_score, "explanation": section_exp}
-    breakdown["word_count"] = {"score": word_score, "explanation": word_exp}
-    breakdown["bullet_points"] = {"score": bullet_score, "explanation": bullet_exp}
-    breakdown["contact_info"] = {"score": contact_score, "explanation": contact_exp}
-    breakdown["formatting"] = {"score": formatting_score, "explanation": formatting_exp}
-    breakdown["consistency"] = {"score": consistency_score, "explanation": consistency_exp}
-    breakdown["readability_grammar"] = {"score": grammar_score, "explanation": grammar_exp}
-    breakdown["readability_flesch"] = {"score": flesch_score, "explanation": flesch_exp}
-    breakdown["ats_compatibility"] = {"score": ats_score, "explanation": ats_exp}
+    # Assign weights
+    weights = {
+        "structure": 0.12,
+        "formatting": 0.12,
+        "word_count": 0.08,
+        "consistency": 0.10,
+        "contact_info": 0.08,
+        "bullet_points": 0.00,  # still included in breakdown but doesn't affect final score
+        "section_headers": 0.10,
+        "ats_compatibility": 0.10,
+        "readability_flesch": 0.10,
+        "readability_grammar": 0.20
+    }
 
-    # Final weighted sum (no division by 100!)
-    final_score = sum(breakdown[k]["score"] * weights[k] for k in weights)
-    final_score = round(final_score * 100, 2)  # Scale to 0–100 range
+    # Save breakdown with contribution
+    for metric, (score, explanation) in {
+        "structure": (structure_score, structure_expl),
+        "formatting": (formatting_score, formatting_expl),
+        "word_count": (word_count_score, word_count_expl),
+        "consistency": (consistency_score, consistency_expl),
+        "contact_info": (contact_score, contact_expl),
+        "bullet_points": (bullet_score, bullet_expl),
+        "section_headers": (header_score, header_expl),
+        "ats_compatibility": (ats_score, ats_expl),
+        "readability_flesch": (flesch_score, flesch_expl),
+        "readability_grammar": (grammar_score, grammar_expl),
+    }.items():
+        score = round(score, 2)
+        contribution = round(score * weights[metric] * 100, 2)
+        breakdown[metric] = {
+            "score": score,
+            "explanation": explanation,
+            "contribution": contribution
+        }
 
-    return final_score, breakdown
+    final_score = sum(breakdown[key]["score"] * weights[key] for key in weights)
+    return round(final_score * 100, 2), breakdown
 
 
 
@@ -863,87 +954,110 @@ def check_language_match(expected_language: str, candidate_languages: list) -> T
             return True, f"Matched expected language: {expected_language}"
     return False, f"Expected language ({expected_language}) not found in candidate languages."
 
-def compute_resume_final_score(job: dict, candidate: dict) -> Tuple[float, Dict]:
+def compute_resume_final_score(job, candidate_data):
+    """
+    Calculate a weighted final candidate score and breakdown per evaluation dimension.
+    """
     weights = {
-        "skill_match": 0.35,  # slightly increased
-        "education_match": 0.1,
+        "skill_match": 0.35,
+        "education_match": 0.10,
         "experience_match": 0.15,
         "portfolio_match": 0.05,
-        "certifications_match": 0.1,
-        "soft_skills_match": 0.05,  # reduced weight
+        "certifications_match": 0.10,
+        "soft_skills_match": 0.05,
         "language_match": 0.05,
-        "previous_role_alignment": 0.15  # reduced weight a bit
+        "previous_role_alignment": 0.15,
     }
 
     breakdown = {}
 
-    skill_match_pct = candidate.get("skills_matched_pct", 0)
+    # 1. Skill Match
+    skill_score = candidate_data.get("skills_matched_pct", 0)
     breakdown["skill_match"] = {
-        "score": skill_match_pct,
-        "explanation": f"Skills match {skill_match_pct}%, based on job and candidate's listed skills."
+        "score": skill_score,
+        "explanation": f"Skills match {round(skill_score, 1)}%, based on job and candidate's listed skills.",
     }
 
-    education_match = candidate.get("education_level_match", False)
+    # 2. Education
+    edu_match = candidate_data.get("education_level_match", False)
+    edu_score = 100 if edu_match else 0
     breakdown["education_match"] = {
-        "score": 100 if education_match else 0,
-        "explanation": "Education meets job requirement." if education_match else "Education below job requirement."
+        "score": edu_score,
+        "explanation": "Candidate has education level that meets job requirement." if edu_match else "Candidate's education does not meet the job requirement.",
     }
 
-    exp_match_bool, exp_expl, role_alignment_score = check_experience_match(
-        job.get("expected_experience_range", "No expectation on experience"),
-        job.get("experience_level", "No expectation on experience"),
-        candidate.get("experience_years", 0),
-        candidate.get("previous_job_titles", []),
-        job.get("job_title", "")
+    # 3. Experience (now using expected_experience_range and check_experience_match)
+    expected_range = job.get("expected_experience_range", "No expectation on experience")
+    expected_level = job.get("experience_level", "No expectation on experience")
+    candidate_years = candidate_data.get("experience_years", 0)
+    prev_titles = candidate_data.get("previous_job_titles", [])
+    job_title = job.get("job_title", "Unknown")
+
+    exp_match, exp_explanation, role_score = check_experience_match(
+        expected_range, expected_level, candidate_years, prev_titles, job_title
     )
+    exp_score = 100 if exp_match else max(0, int((candidate_years / 10) * 100))  # fallback linear scaling
     breakdown["experience_match"] = {
-        "score": 100 if exp_match_bool else 0,
-        "explanation": exp_expl.replace("Best previous job title alignment:", "We also looked at similar roles and found an alignment of")
-    }
-    breakdown["previous_role_alignment"] = {
-        "score": role_alignment_score,
-        "explanation": f"We also looked at similar roles and found an alignment of {role_alignment_score}%."
+        "score": exp_score,
+        "explanation": exp_explanation,
     }
 
-    portfolio_match, portfolio_expl = check_portfolio_match(
-        job.get("expected_portfolio", ""),
-        candidate.get("portfolio_url", "")
-    )
+    # 4. Portfolio
+    portfolio_required = job.get("requires_portfolio", False)
+    has_portfolio = candidate_data.get("portfolio_url") != ""
+    portfolio_score = 100 if (not portfolio_required or has_portfolio) else 0
     breakdown["portfolio_match"] = {
-        "score": 100 if portfolio_match else 0,
-        "explanation": portfolio_expl
+        "score": portfolio_score,
+        "explanation": "Candidate has portfolio." if portfolio_score == 100 else "No portfolio submitted and the job requires one." if portfolio_required else "No portfolio requirement specified by job.",
     }
 
-    certs_match_pct, certs_expl = check_certifications_match(
-        job.get("expected_certifications", []),
-        candidate.get("certifications", [])
-    )
+    # 5. Certifications (now checks if job expects any)
+    certs_required = job.get("expected_certifications", [])
+    certs_candidate = candidate_data.get("certifications", [])
+    cert_score = 100 if not certs_required else int((len(set(certs_required) & set(certs_candidate)) / len(certs_required)) * 100)
+
+    if not certs_required:
+        cert_explanation = "No certifications required for this job."
+    else:
+        cert_explanation = f"Matched {cert_score}% of required certifications."
+
     breakdown["certifications_match"] = {
-        "score": certs_match_pct,
-        "explanation": certs_expl
+        "score": cert_score,
+        "explanation": cert_explanation,
     }
 
-    soft_skills_match_pct, soft_skills_expl = check_soft_skills_match(
-        job.get("expected_soft_skills", []),
-        candidate.get("soft_skills", [])
-    )
+    # 6. Soft Skills
+    soft_required = job.get("expected_soft_skills", [])
+    soft_candidate = candidate_data.get("soft_skills", [])
+    soft_score = 100 if not soft_required else int((len(set(soft_required) & set(soft_candidate)) / len(soft_required)) * 100)
     breakdown["soft_skills_match"] = {
-        "score": soft_skills_match_pct,
-        "explanation": soft_skills_expl
+        "score": soft_score,
+        "explanation": "Candidate matches soft skill requirements." if soft_score == 100 else "No soft skills required for this job." if not soft_required else f"Matched {soft_score}% of required soft skills.",
     }
 
-    language_match, language_expl = check_language_match(
-        job.get("expected_language", ""),
-        candidate.get("languages", [])
-    )
+    # 7. Language Match
+    lang_required = job.get("expected_languages", [])
+    lang_candidate = candidate_data.get("languages", [])
+    lang_score = 100 if not lang_required else int((len(set(lang_required) & set(lang_candidate)) / len(lang_required)) * 100)
     breakdown["language_match"] = {
-        "score": 100 if language_match else 0,
-        "explanation": language_expl
+        "score": lang_score,
+        "explanation": "Candidate meets language requirement." if lang_score == 100 else "No language requirement specified." if not lang_required else f"Matched {lang_score}% of required languages.",
     }
 
-    final_score = sum(breakdown[k]["score"] * weights[k] for k in weights)
-    final_score = round(final_score / 100, 2) * 100
+    # 8. Previous Role Alignment (fallback score)
+    previous_role_score = candidate_data.get("previous_role_score", 0)
+    breakdown["previous_role_alignment"] = {
+        "score": previous_role_score,
+        "explanation": f"We also looked at similar roles and found an alignment of {previous_role_score}%.",
+    }
 
+    # Add contribution field to each score
+    for key in breakdown:
+        score = breakdown[key].get("score", 0)
+        weight = weights.get(key, 0)
+        breakdown[key]["contribution"] = round(score * weight, 2)
+
+    final_score = round(sum(breakdown[k]["contribution"] for k in weights), 2)
     return final_score, breakdown
 
 
