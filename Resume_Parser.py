@@ -954,11 +954,47 @@ def check_language_match(expected_language: str, candidate_languages: list) -> T
             return True, f"Matched expected language: {expected_language}"
     return False, f"Expected language ({expected_language}) not found in candidate languages."
 
-def compute_resume_final_score(job, candidate_data):
+
+
+
+#EVALUATE RESUME
+
+def get_client_preferences(client_id):
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT custom_eval_prompt, skill_match_weight, education_match_weight, experience_match_weight,
+               portfolio_match_weight, certifications_match_weight, soft_skills_weight,
+               language_weight, previous_role_alignment_weight
+        FROM clients WHERE id = %s
+    """, (client_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        return None, {}
+
+    prompt = row[0]
+    weights = {
+        "skill_match": row[1],
+        "education_match": row[2],
+        "experience_match": row[3],
+        "portfolio_match": row[4],
+        "certifications_match": row[5],
+        "soft_skills_match": row[6],
+        "language_match": row[7],
+        "previous_role_alignment": row[8]
+    }
+    return prompt, weights
+
+
+def compute_resume_final_score(job, candidate_data, client_weights=None):
     """
     Calculate a weighted final candidate score and breakdown per evaluation dimension.
+    Uses custom client weights if provided and valid (sums to 100).
     """
-    weights = {
+    default_weights = {
         "skill_match": 0.35,
         "education_match": 0.10,
         "experience_match": 0.15,
@@ -969,16 +1005,22 @@ def compute_resume_final_score(job, candidate_data):
         "previous_role_alignment": 0.15,
     }
 
+    weights = default_weights
+    if client_weights:
+        total = sum([v for v in client_weights.values() if v is not None])
+        if round(total) == 100:
+            weights = {k: (client_weights.get(k, 0) or 0) / 100 for k in default_weights}
+
     breakdown = {}
 
-    # 1. Skill Match
+    # Skill Match
     skill_score = candidate_data.get("skills_matched_pct", 0)
     breakdown["skill_match"] = {
         "score": skill_score,
         "explanation": f"Skills match {round(skill_score, 1)}%, based on job and candidate's listed skills.",
     }
 
-    # 2. Education
+    # Education
     edu_match = candidate_data.get("education_level_match", False)
     edu_score = 100 if edu_match else 0
     breakdown["education_match"] = {
@@ -986,7 +1028,7 @@ def compute_resume_final_score(job, candidate_data):
         "explanation": "Candidate has education level that meets job requirement." if edu_match else "Candidate's education does not meet the job requirement.",
     }
 
-    # 3. Experience (now using expected_experience_range and check_experience_match)
+    # Experience
     expected_range = job.get("expected_experience_range", "No expectation on experience")
     expected_level = job.get("experience_level", "No expectation on experience")
     candidate_years = candidate_data.get("experience_years", 0)
@@ -996,13 +1038,13 @@ def compute_resume_final_score(job, candidate_data):
     exp_match, exp_explanation, role_score = check_experience_match(
         expected_range, expected_level, candidate_years, prev_titles, job_title
     )
-    exp_score = 100 if exp_match else max(0, int((candidate_years / 10) * 100))  # fallback linear scaling
+    exp_score = 100 if exp_match else max(0, int((candidate_years / 10) * 100))
     breakdown["experience_match"] = {
         "score": exp_score,
         "explanation": exp_explanation,
     }
 
-    # 4. Portfolio
+    # Portfolio
     portfolio_required = job.get("requires_portfolio", False)
     has_portfolio = candidate_data.get("portfolio_url") != ""
     portfolio_score = 100 if (not portfolio_required or has_portfolio) else 0
@@ -1011,22 +1053,17 @@ def compute_resume_final_score(job, candidate_data):
         "explanation": "Candidate has portfolio." if portfolio_score == 100 else "No portfolio submitted and the job requires one." if portfolio_required else "No portfolio requirement specified by job.",
     }
 
-    # 5. Certifications (now checks if job expects any)
+    # Certifications
     certs_required = job.get("expected_certifications", [])
     certs_candidate = candidate_data.get("certifications", [])
     cert_score = 100 if not certs_required else int((len(set(certs_required) & set(certs_candidate)) / len(certs_required)) * 100)
-
-    if not certs_required:
-        cert_explanation = "No certifications required for this job."
-    else:
-        cert_explanation = f"Matched {cert_score}% of required certifications."
-
+    cert_explanation = "No certifications required for this job." if not certs_required else f"Matched {cert_score}% of required certifications."
     breakdown["certifications_match"] = {
         "score": cert_score,
         "explanation": cert_explanation,
     }
 
-    # 6. Soft Skills
+    # Soft Skills
     soft_required = job.get("expected_soft_skills", [])
     soft_candidate = candidate_data.get("soft_skills", [])
     soft_score = 100 if not soft_required else int((len(set(soft_required) & set(soft_candidate)) / len(soft_required)) * 100)
@@ -1035,7 +1072,7 @@ def compute_resume_final_score(job, candidate_data):
         "explanation": "Candidate matches soft skill requirements." if soft_score == 100 else "No soft skills required for this job." if not soft_required else f"Matched {soft_score}% of required soft skills.",
     }
 
-    # 7. Language Match
+    # Language Match
     lang_required = job.get("expected_languages", [])
     lang_candidate = candidate_data.get("languages", [])
     lang_score = 100 if not lang_required else int((len(set(lang_required) & set(lang_candidate)) / len(lang_required)) * 100)
@@ -1044,14 +1081,14 @@ def compute_resume_final_score(job, candidate_data):
         "explanation": "Candidate meets language requirement." if lang_score == 100 else "No language requirement specified." if not lang_required else f"Matched {lang_score}% of required languages.",
     }
 
-    # 8. Previous Role Alignment (fallback score)
+    # Previous Role Alignment
     previous_role_score = candidate_data.get("previous_role_score", 0)
     breakdown["previous_role_alignment"] = {
         "score": previous_role_score,
         "explanation": f"We also looked at similar roles and found an alignment of {previous_role_score}%.",
     }
 
-    # Add contribution field to each score
+    # Add contributions
     for key in breakdown:
         score = breakdown[key].get("score", 0)
         weight = weights.get(key, 0)
@@ -1060,9 +1097,6 @@ def compute_resume_final_score(job, candidate_data):
     final_score = round(sum(breakdown[k]["contribution"] for k in weights), 2)
     return final_score, breakdown
 
-
-
-#EVALUATE RESUME
 
 def evaluation_prompting(
     job: dict,
@@ -1080,7 +1114,8 @@ def evaluation_prompting(
     quality_breakdown: dict,
     final_score: float,
     score_breakdown: dict,
-    cover_letter: str = ""
+    cover_letter: str = "",
+    custom_prompt: str = ""  # new optional parameter
 ) -> str:
     """
     Generates GPT prompt for evaluating a resume. Returns strengths/weaknesses as JSON arrays (for frontend).
@@ -1169,6 +1204,8 @@ def evaluation_prompting(
 - Score Breakdown: {score_breakdown}
 
 ### Evaluation Rules:
+{custom_prompt.strip() if custom_prompt else ""}
+
 - Start the summary with the candidate's name.
 - Make the summary longer and more technical — 1 to 2 sentences clearly stating why the candidate is or isn’t a good fit.
 - Highlight “proven” skills when repeated in multiple sections.
@@ -1190,7 +1227,7 @@ Only return valid JSON.
     return prompt.strip()
 
 
-def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "", pdf_path: str = None) -> Dict[str, Any]:
+def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_letter: str = "", pdf_path: str = None, client_id=None) -> Dict[str, Any]:
     from collections import defaultdict
 
     technical_skills_field = resume_data.get("technical_skills")
@@ -1260,7 +1297,15 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
         "soft_skills": final_soft,
         "languages": [get_value(resume_data.get("languages", ""))]
     }
-    final_score, score_breakdown = compute_resume_final_score(job, candidate_data)
+    
+    custom_prompt = ""
+    custom_weights = {}
+
+    if client_id:
+        custom_prompt, custom_weights = get_client_preferences(client_id)
+
+
+    final_score, score_breakdown = compute_resume_final_score(job, candidate_data, client_weights=custom_weights)
 
     # Use structured breakdown for prompting but also stringify for GPT context
     breakdown_text = json.dumps(structured_breakdown, indent=2)
@@ -1281,7 +1326,9 @@ def evaluate_resume(resume_data: Dict[str, Any], job: Dict[str, Any], cover_lett
         quality_breakdown=quality_breakdown,
         final_score=final_score,
         score_breakdown=score_breakdown,
-        cover_letter=cover_letter
+        cover_letter=cover_letter,
+        custom_prompt=custom_prompt
+        
     )
 
     response = openai_client.chat.completions.create(
@@ -1460,7 +1507,7 @@ def process_resume_file(file_path: str, job_title="Unknown Role", cover_letter="
     parsed_resume = read_resume(file_path)
     job = get_job_record_from_db(job_title, client_id)  # Fetch full job record as dict
 
-    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job, cover_letter, pdf_path=file_path)
+    gpt_result = evaluate_resume(parsed_resume.inference.prediction.fields, job, cover_letter, pdf_path=file_path, client_id=client_id)
 
     # Save to DB (no Copyleaks metrics)
     save_to_postgresql(parsed_resume.inference.prediction.fields, gpt_result, job_title, resume_url, client_id, resume_source)

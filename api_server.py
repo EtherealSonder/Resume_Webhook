@@ -178,6 +178,220 @@ def login():
     else:
         return jsonify({"error": "Invalid credentials"}), 401
 
+@app.route("/update_user", methods=["POST"])
+def update_user():
+    data = request.get_json()
+    client_id = data.get("id")
+    field = data.get("field")
+    value = data.get("value")
+
+    if field not in ["name", "email"]:
+        return jsonify({"success": False, "message": "Invalid field"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        # Debug logging
+        print("Attempting to update:", field, "=", value)
+
+        # Email conflict check
+        if field == "email":
+            cur.execute("SELECT id FROM clients WHERE email = %s AND id != %s", (value, client_id))
+            if cur.fetchone():
+                return jsonify({"success": False, "message": "Email already exists"}), 400
+
+        if field == "name":
+            cur.execute("SELECT id FROM clients WHERE name = %s AND id != %s", (value, client_id))
+            if cur.fetchone():
+                return jsonify({"success": False, "message": "Name already exists"}), 400
+
+        cur.execute(f"UPDATE clients SET {field} = %s WHERE id = %s", (value, client_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"success": True})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+from werkzeug.security import check_password_hash, generate_password_hash
+
+@app.route("/verify_password", methods=["POST"])
+def verify_password():
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM clients WHERE email = %s", (email,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if row and check_password_hash(row[0], password):
+            return jsonify({"valid": True})
+        return jsonify({"valid": False})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"valid": False, "error": str(e)}), 500
+
+
+@app.route("/update_password", methods=["POST"])
+def update_password():
+    data = request.get_json()
+    email = data.get("email")
+    current_password = data.get("current_password")
+    new_password = data.get("new_password")
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        cur.execute("SELECT password FROM clients WHERE email = %s", (email,))
+        row = cur.fetchone()
+        if not row or not check_password_hash(row[0], current_password):
+            cur.close()
+            conn.close()
+            return jsonify({"success": False, "message": "Incorrect current password"}), 403
+
+        hashed = generate_password_hash(new_password)
+        cur.execute("UPDATE clients SET password = %s WHERE email = %s", (hashed, email))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"success": True})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route("/delete_user", methods=["POST"])
+def delete_user():
+    data = request.get_json()
+    user_id = data.get("id")
+    print("DELETE USER ID:", user_id)
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+
+        cur.execute("DELETE FROM clients WHERE id = %s;", (user_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"success": True})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/client_preferences", methods=["GET"])
+def get_client_preferences_route():
+    client_id = request.args.get("client_id")
+
+    if not client_id:
+        return jsonify({"success": False, "error": "Missing client ID"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))        
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT custom_eval_prompt,
+                   skill_match_weight,
+                   education_match_weight,
+                   experience_match_weight,
+                   portfolio_match_weight,
+                   certifications_match_weight,
+                   soft_skills_weight,
+                   language_weight,
+                   previous_role_alignment_weight
+            FROM clients WHERE id = %s
+        """, (client_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            return jsonify({"success": False, "error": "Client not found"}), 404
+
+        prompt = row[0]
+        weights = {
+            "skill_match": row[1],
+            "education_match": row[2],
+            "experience_match": row[3],
+            "portfolio_match": row[4],
+            "certifications_match": row[5],
+            "soft_skills_match": row[6],
+            "language_match": row[7],
+            "previous_role_alignment": row[8]
+        }
+
+        return jsonify({"success": True, "prompt": prompt, "weights": weights})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/client_preferences/update", methods=["POST"])
+def update_client_preferences():
+    data = request.get_json()
+    client_id = data.get("client_id")
+    prompt = data.get("custom_eval_prompt")
+    weights = data.get("weights", {})
+
+    if not client_id:
+        return jsonify({"success": False, "error": "Missing client ID"}), 400
+
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))        
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE clients SET
+                custom_eval_prompt = %s,
+                skill_match_weight = %s,
+                education_match_weight = %s,
+                experience_match_weight = %s,
+                portfolio_match_weight = %s,
+                certifications_match_weight = %s,
+                soft_skills_weight = %s,
+                language_weight = %s,
+                previous_role_alignment_weight = %s
+            WHERE id = %s
+        """, (
+            prompt,
+            weights.get("skill_match"),
+            weights.get("education_match"),
+            weights.get("experience_match"),
+            weights.get("portfolio_match"),
+            weights.get("certifications_match"),
+            weights.get("soft_skills_match"),
+            weights.get("language_match"),
+            weights.get("previous_role_alignment"),
+            client_id
+        ))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"success": True})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/candidates", methods=["GET"])
 def get_candidates():
     client_id = request.args.get("client_id")
