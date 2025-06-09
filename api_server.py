@@ -20,10 +20,11 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True, origins=[
-    "http://localhost:3000",  # Local frontend dev
-    "https://lupiq.vercel.app",  # Your custom domain
-    "https://lupiq-frontend-5y7lucg6i-greylupa-lupiq.vercel.app/"  # Vercel preview deployments
+    "http://localhost:3000",  
+    "https://lupiq.vercel.app", 
+    "https://lupiq-frontend-5y7lucg6i-greylupa-lupiq.vercel.app"  
 ])
+
 logging.basicConfig(level=logging.INFO)
 
 form_template = """
