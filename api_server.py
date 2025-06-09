@@ -21,11 +21,15 @@ load_dotenv()
 app = Flask(__name__)
 
 CORS(app, supports_credentials=True, resources={
-    r"/*": {"origins": [
-        "http://localhost:3000",
-        "https://lupiq.vercel.app",
-        "https://lupiq-frontend-*.vercel.app"  # wildcard allowed
-    ]}
+    r"/*": {
+        "origins": [
+            "http://localhost:3000",
+            "https://lupiq.vercel.app",
+            "https://lupiq-frontend-5y7lucg6i-greylupa-lupiq.vercel.app"
+        ],
+        "allow_headers": ["Content-Type"],
+        "methods": ["GET", "POST", "OPTIONS"]
+    }
 })
 
 
