@@ -19,7 +19,10 @@ import threading
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["https://lupiq-frontend-i5a7qre0f-gunabalan-lingams-projects.vercel.app"])
+CORS(app, supports_credentials=True, origins=[
+    "https://lupiq.vercel.app",
+    "http://localhost:3000"
+])
 logging.basicConfig(level=logging.INFO)
 
 form_template = """
