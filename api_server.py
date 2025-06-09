@@ -20,17 +20,16 @@ load_dotenv()
 
 app = Flask(__name__)
 
-CORS(app, supports_credentials=True, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost:3000",
-            "https://lupiq.vercel.app",
-            "https://lupiq-frontend-5y7lucg6i-greylupa-lupiq.vercel.app"
-        ],
-        "allow_headers": ["Content-Type"],
-        "methods": ["GET", "POST", "OPTIONS"]
-    }
-})
+def custom_cors_origin(origin):
+    if origin is None:
+        return False
+    return (
+        origin.startswith("http://localhost:3000") or
+        origin.startswith("https://lupiq.vercel.app") or
+        origin.startswith("https://lupiq-frontend-")  # allow all Vercel preview links
+    )
+
+CORS(app, supports_credentials=True, origins=custom_cors_origin)
 
 
 logging.basicConfig(level=logging.INFO)
