@@ -141,9 +141,23 @@ def clear_notification():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-@app.route("/signup", methods=["POST"])
+from flask import make_response
+
+def build_cors_preflight_response():
+    response = make_response()
+    response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+    response.headers.add("Access-Control-Allow-Credentials", "true")
+    return response, 200
+
+
+@app.route("/signup", methods=["POST", "OPTIONS"])
 @cross_origin(supports_credentials=True)
 def signup():
+    if request.method == "OPTIONS":
+        return build_cors_preflight_response()
+    
     data = request.get_json()
     name = data.get("name")
     email = data.get("email")
@@ -170,9 +184,12 @@ def signup():
 
     return jsonify({"id": client_id, "name": name, "email": email})
 
-@app.route("/login", methods=["POST"])
+@app.route("/login", methods=["POST", "OPTIONS"])
 @cross_origin(supports_credentials=True)
 def login():
+    if request.method == "OPTIONS":
+        return build_cors_preflight_response()
+    
     data = request.get_json()
     email = data.get("email")
     password = data.get("password")
