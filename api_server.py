@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from Resume_Parser import process_resume_file
 from job_parser import parse_job_description_with_gpt
 
@@ -142,6 +142,7 @@ def clear_notification():
         return jsonify({"error": str(e)})
 
 @app.route("/signup", methods=["POST"])
+@cross_origin(supports_credentials=True)
 def signup():
     data = request.get_json()
     name = data.get("name")
@@ -170,6 +171,7 @@ def signup():
     return jsonify({"id": client_id, "name": name, "email": email})
 
 @app.route("/login", methods=["POST"])
+@cross_origin(supports_credentials=True)
 def login():
     data = request.get_json()
     email = data.get("email")
