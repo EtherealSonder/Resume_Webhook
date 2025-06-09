@@ -9,6 +9,9 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET = os.getenv("AWS_S3_BUCKET_NAME")
 AWS_REGION = os.getenv("AWS_REGION")
 
+if not all([AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_BUCKET, AWS_REGION]):
+    raise ValueError("Missing one or more AWS environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_S3_BUCKET_NAME, AWS_REGION")
+
 s3 = boto3.client(
     's3',
     region_name=AWS_REGION,
