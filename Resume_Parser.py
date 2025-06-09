@@ -704,34 +704,18 @@ def check_consistency(text: str) -> Tuple[float, str]:
 
 
 
-def check_readability(text: str) -> Tuple[float, str]:
-    tool = language_tool_python.LanguageTool('en-US')
-    matches = tool.check(text)
-    error_count = len(matches)
-
-    # Score calculation
-    if error_count <= 5:
-        score = 1.0
-    elif error_count <= 15:
-        score = 0.7
-    else:
-        score = 0.4
-
-    # Prepare readable examples
-    detailed_examples = []
-    for match in matches[:5]:
-        context_text = match.context
-        error_offset = match.offset
-        error_length = match.errorLength
-        error_snippet = context_text[max(0, error_offset - 10): error_offset + error_length + 10].strip()
-        suggestion = match.message
-        detailed_examples.append(f"'{error_snippet}' – {suggestion}")
-
-    explanation = f"Detected {error_count} grammar/spelling issues."
-    if detailed_examples:
-        explanation += " Notable examples: " + "; ".join(detailed_examples)
-
-    return score, explanation
+# Safe, default fallback
+def check_readability(resume_text):
+    try:
+        import language_tool_python
+        tool = language_tool_python.LanguageTool('en-US')
+        matches = tool.check(resume_text)
+        grammar_score = max(0, 1 - len(matches) / max(1, len(resume_text.split())))
+        explanation = f"Found {len(matches)} grammar issues."
+    except Exception as e:
+        grammar_score = 0.5
+        explanation = f"Grammar check skipped: {str(e)}"
+    return grammar_score, explanation
 
 def check_readability_flesch(text: str) -> Tuple[float, str]:
     flesch_score = textstat.flesch_reading_ease(text)
