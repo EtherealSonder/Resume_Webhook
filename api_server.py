@@ -29,7 +29,7 @@ def custom_cors_origin(origin):
         origin.startswith("https://lupiq-frontend-")  # allow all Vercel preview links
     )
 
-CORS(app, supports_credentials=True, origins=custom_cors_origin)
+CORS(app, supports_credentials=True, origins="*")
 
 
 logging.basicConfig(level=logging.INFO)
@@ -1516,6 +1516,25 @@ def get_cover_letter_quality():
 
 
 
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        resp = app.make_default_options_response()
+        headers = resp.headers
+
+        origin = request.headers.get("Origin")
+        if origin and (
+            origin == "https://lupiq.vercel.app" or
+            origin.startswith("https://lupiq-frontend-")
+        ):
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            headers["Access-Control-Allow-Headers"] = request.headers.get(
+                "Access-Control-Request-Headers", "Authorization, Content-Type"
+            )
+            headers["Access-Control-Allow-Credentials"] = "true"
+
+        return resp
 
 
 if __name__ == "__main__":
