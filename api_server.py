@@ -19,10 +19,11 @@ import threading
 load_dotenv()
 
 app = Flask(__name__)
+
 CORS(app, supports_credentials=True, origins=[
-    "http://localhost:3000",  
-    "https://lupiq.vercel.app", 
-    "https://lupiq-frontend-5y7lucg6i-greylupa-lupiq.vercel.app"  
+    "http://localhost:3000",
+    "https://lupiq.vercel.app",  # Your custom Vercel domain
+    r"https://.*\.vercel\.app"   # Matches any Vercel preview subdomain
 ])
 
 logging.basicConfig(level=logging.INFO)
