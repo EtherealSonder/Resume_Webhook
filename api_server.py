@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS, cross_origin
 from Resume_Parser import process_resume_file
 from job_parser import parse_job_description_with_gpt
+from ask_lupiq_prompt import PROMPT_SYSTEM_INSTRUCTIONS, build_gpt_prompt
 
 from s3_utils import upload_to_s3 
 import tempfile
@@ -1535,6 +1536,78 @@ def handle_preflight():
             headers["Access-Control-Allow-Credentials"] = "true"
 
         return resp
+
+
+@app.route("/ask_lupiq", methods=["POST"])
+def ask_lupiq():
+    data = request.get_json()
+    client_id = data.get("client_id")
+    question = data.get("query")
+
+    if not client_id or not question:
+        return jsonify({"error": "Missing client_id or query"}), 400
+
+    try:
+        # Step 1: Fetch all candidates for this client
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT r.candidate_name, j.job_title, r.score, r.experience_years,
+                   r.technical_skills, r.soft_skills, r.summary,
+                   r.education_level, r.certifications, r.cover_letter_analysis
+            FROM resumes r
+            JOIN jobs j ON r.job_id = j.id
+            WHERE j.client_id = %s
+            ORDER BY r.score DESC
+            LIMIT 50;  -- limit for context window
+        """, (client_id,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        # Step 2: Format candidate data
+        candidates = []
+        for row in rows:
+            candidates.append({
+                "name": row[0],
+                "job_title": row[1],
+                "score": row[2],
+                "experience_years": row[3],
+                "technical_skills": row[4],
+                "soft_skills": row[5],
+                "summary": row[6],
+                "education_level": row[7],
+                "certifications": row[8],
+                "cover_letter_analysis": row[9],
+            })
+
+        # Step 3: Call GPT with advanced prompt
+        prompt = build_gpt_prompt(candidates, question)
+
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": PROMPT_SYSTEM_INSTRUCTIONS},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+        )
+
+        raw = response.choices[0].message.content
+        if raw.startswith("```"):
+            raw = raw.strip("`").split("json", 1)[-1].strip()
+
+        import json
+        return jsonify(json.loads(raw))
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 
 
 if __name__ == "__main__":
